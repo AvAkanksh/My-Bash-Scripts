@@ -1,0 +1,31 @@
+#!/bin/sh
+
+cache_file=~/.cache/.sbs
+backgrounds_dir=~/Pictures/wall/
+
+if [ ! -e "$cache_file" ] ; then
+    printf "NULL" > "$cache_file"
+fi
+
+current_bg=$(head -1 ~/.cache/.sbs)
+first_bg=$(ls -a -p ~/Pictures/wall/ | grep -v / | head -1)
+#echo $current_bg
+#echo $first_bg
+if [ "$current_bg" == "\n" ]
+then
+#	echo "HI"
+#	sed -i "s/^.*$/$first_bg/" $cache_file
+	echo $first_bag > $cache_file
+#	echo "hi"
+else
+	next_bg=$(ls -a -p ~/Pictures/wall/ | grep -A1 $current_bg | tail -n 1)
+#	echo $next_bg
+	if [ "$current_bg" == "$next_bg" ]
+	then
+		sed -i "1s/^.*$/$first_bg/" $cache_file
+	else
+		sed -i "1s/^.*$/$next_bg/" $cache_file
+	fi
+fi
+
+sbs ~/Pictures/wall/$current_bg

@@ -1,0 +1,7 @@
+#!/bin/sh
+
+echo -n -e "\e[7;42m Enter URL > \e[0m "
+read url
+param=$(echo $url | awk -F'/' '{print $NF}')
+mpv $(curl "https://diskuploader.entertainvideo.com/v1/file/cdnurl?param=${param}" | jq -r '.source' )
+

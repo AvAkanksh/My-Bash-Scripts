@@ -1,0 +1,21 @@
+#!/bin/sh
+
+echo "Choosing a random wallpaper ..." 
+wall=$(find /home/akanksh/Pictures/wall -type f | shuf -n 1 )
+wall2=$(find /home/akanksh/Pictures/wall -type f | shuf -n 1 )
+echo "Setting up Wallpaper .."
+echo $wall
+xwallpaper --zoom $wall
+echo "Generating pywal color schemes..."
+#echo "[General]" > /usr/share/sddm/themes/endeavouros/theme.conf
+#echo "background=$wall" >> /usr/share/sddm/themes/endeavouros/theme.conf
+(echo " " | sudo -S cp $wall2 /usr/local/share/wallpaper/wall.jpg)
+#(echo " " | sudo -S test > /dev/null)
+wal -i $wall > /dev/null
+sed -i 'N;$!P;D' $HOME/.cache/wal/colors-wal-dwm.h
+echo "Recompiling dwm with new colors..."
+(cd $HOME/.local/src/dwm-enhanced/ && echo " "| sudo -S make clean install > /dev/null)
+(cd $HOME/.local/src/st-enhanced/ &&  sudo make clean install > /dev/null)
+
+echo " :)  Restart dwm for new Look !"
+
