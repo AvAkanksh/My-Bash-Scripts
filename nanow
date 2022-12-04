@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+
+if [[ $1 == '' ]]; then
+  read -p "Filename :" file_name
+else
+  file_name=$1
+fi
+
+#echo "you have entered " $file_name
+nano $(which $file_name)

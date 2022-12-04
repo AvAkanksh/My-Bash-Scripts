@@ -1,3 +1,0 @@
-#!/usr/bin/bash
-
-nano $(which $1)
