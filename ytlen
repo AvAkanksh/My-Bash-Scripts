@@ -1,29 +1,3 @@
 #!/usr/bin/bash
-
-durations=$(yt-dlp --print duration $1);
-tot=0;
-
-for i in $durations;do 
-tot=$(( tot + $i )); 
-done;
-
-tot1=$tot;
-echo "1.00x" $(date -d@$tot1 -u +%H:%M:%S)
-
-tot1_25=$(python3 -c "print($tot/1.25)");
-echo "1.25x" $(date -d@$tot1_25 -u +%H:%M:%S)
-
-tot1_5=$(python3 -c "print($tot/1.5)");
-echo "1.50x" $(date -d@$tot1_5 -u +%H:%M:%S)
-
-tot1_75=$(python3 -c "print($tot/1.75)");
-echo "1.75x" $(date -d@$tot1_75 -u +%H:%M:%S)
-
-tot2=$(python3 -c "print($tot/2)");
-echo "2.00x" $(date -d@$tot2 -u +%H:%M:%S)
-
-tot2_25=$(python3 -c "print($tot/2.25)");
-echo "2.25x" $(date -d@$tot2_25 -u +%H:%M:%S)
-
-tot2_5=$(python3 -c "print($tot/2.5)");
-echo "2.50x" $(date -d@$tot2_5 -u +%H:%M:%S)
+url=$1
+curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "search_string=$url" "https://ytplaylist-len.sharats.dev/" | pup '--color' "div.container div.content p json{}" | jq -r '.[].text'
