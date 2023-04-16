@@ -1,0 +1,1 @@
+objc[8150]: Class WebSwapCGLLayer is implemented in both /System/Library/Frameworks/WebKit.framework/Versions/A/Frameworks/WebCore.framework/Versions/A/Frameworks/libANGLE-shared.dylib (0x227d02fe0) and /Applications/Spotify.app/Contents/Frameworks/Chromium Embedded Framework.framework/Libraries/libGLESv2.dylib (0x106ee7c28). One of the two will be used. Which one is undefined.
