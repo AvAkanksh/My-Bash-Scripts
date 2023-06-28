@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/bin/bash
 url=$1
 #curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "search_string=$url" "https://ytplaylist-len.sharats.dev/" | pup '--color' "div.container div.content p json{}" | jq -r '.[].text'
 curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "url=$url" "https://yt-playlist-len.vercel.app/" | pup --color "pre text{}"
