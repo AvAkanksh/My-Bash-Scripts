@@ -1,0 +1,18 @@
+#!/bin/bash
+
+input=$1
+
+# Convert to lowercase
+converted=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+
+# Remove unwanted characters
+converted=$(echo "$converted" | tr -cd '[:alnum:]- ')
+
+# Replace spaces and colons with hyphens
+converted=$(echo "$converted" | tr ' ' '-' | tr ':' '-')
+
+# Remove redundant hyphens
+converted=$(echo "$converted" | sed 's/--*/-/g' | sed 's/-$//')
+
+# Print the converted string
+echo "$converted"
