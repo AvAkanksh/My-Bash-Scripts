@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+
+filename=$1
+
+if [[ -f "$filename" ]]; then
+  curl -s -F"file=@$filename" https://0x0.st | xclip -selection clipboard
+  echo "The link is copied to the clipboard!!!"
+else
+  echo "Error: File '$filename' not found."
+fi
