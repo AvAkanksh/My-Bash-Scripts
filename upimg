@@ -1,0 +1,5 @@
+url="https://graph.org$(curl -s -F"file=@$(find ~/Pictures/screenshots/| sort | tail -1)" "https://graph.org/upload" | jq -r ".[0].src" )"
+echo $url
+echo "Copied url to Clipboard!"
+echo $url | pbcopy
+
