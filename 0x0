@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Set the file path
+file_path="/home/akanksh/Pictures/ScreenShots"
+
+# Check if the path is empty
+if [ -z "$file_path" ]; then
+  echo "Error: File path is required."
+  exit 1
+fi
+
+# Get the last file in the path
+last_file=$(ls -t "$file_path" | head -n 1)
+
+# Check if a file was found
+if [ -z "$last_file" ]; then
+  echo "Error: No files found in path '$file_path'."
+  exit 1
+fi
+
+
+# Print the last file
+echo "Pushing the image '$file_path': $last_file  to 0x0.st"
+
+curl -s -F"file=@$file_path/$last_file" https://0x0.st | xclip -selection clipboard
+
+echo "Copied the link to the clipboard!!!"
+
