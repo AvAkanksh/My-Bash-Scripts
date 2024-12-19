@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Ensure jq is available for JSON formatting (optional)
+format_json=false
+if command -v jq &>/dev/null; then
+    format_json=true
+fi
+
+# Function to print usage
+usage() {
+    echo "Usage: $0 <video_url>"
+    exit 1
+}
+
+# Check if a URL is provided as an argument
+[ -z "$1" ] && usage
+
+# Input parameters
+VIDEO_URL="$1"
+API_URL="https://tactiq-apps-prod.tactiq.io/transcript"
+
+# Make the POST request using curl
+response=$(curl -s -X POST "$API_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"videoUrl\": \"$VIDEO_URL\", \"langCode\": \"en\"}")
+
+# Check for errors in the response
+if [ -z "$response" ]; then
+    echo "Error: No response from the server. Please check your internet connection or API URL."
+    exit 1
+fi
+
+# Print the response
+echo "Transcript Response copied !"
+if $format_json; then
+    echo "$response" | jq -r '.captions[].text' | xclip -selection clipboard
+else
+    echo "$response"
+fi
