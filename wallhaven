@@ -4,7 +4,7 @@ for page in {1..3};do
 urls=$(curl -s "https://wallhaven.cc/api/v1/search?q=$1&purity=100&ratios=landscape,16x9,16x10&sorting=views&categories=110&page=$page&apikey=pgImy4me0OJwPtR9nssFcOjcEV1GrOU4" | jq -r ".data[] .path")
 for url in $urls
 do
-aria2c --continue=true -d /Users/adugani.vanjari/Pictures/wallpapers $url
+aria2c --continue=true -d /home/akanksh/Pictures/wall $url
 done
 done
 
