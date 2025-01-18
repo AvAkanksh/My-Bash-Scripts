@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# Folder containing your wallpapers
+WALLPAPER_DIR="/home/akanksh/Pictures/wall/"
+
+# If an argument is provided, use it as the wallpaper path, otherwise choose randomly from the folder
+if [ -n "$1" ]; then
+    WALLPAPER_PATH="$1"
+else
+    # Choose a random file from the wallpaper directory
+    WALLPAPER_PATH=$(find "$WALLPAPER_DIR" -type f -iname "*.jpg" -o -iname "*.png" | shuf -n 1)
+fi
+
+# Check if a valid image path is found
+if [ ! -f "$WALLPAPER_PATH" ]; then
+    echo "No valid image found!"
+    exit 1
+fi
+
+# Set the wallpaper for both light and dark themes using gsettings
+gsettings set org.gnome.desktop.background picture-uri "file://$WALLPAPER_PATH"
+gsettings set org.gnome.desktop.background picture-uri-dark "file://$WALLPAPER_PATH"
+
+# Use pywal to set the terminal theme
+wal -i "$WALLPAPER_PATH"
+
+echo "Wallpaper set to: $WALLPAPER_PATH"
