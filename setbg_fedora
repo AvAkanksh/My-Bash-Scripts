@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 
 # Folder containing your wallpapers
 WALLPAPER_DIR="/home/akanksh/Pictures/wall/"
@@ -21,7 +21,10 @@ fi
 gsettings set org.gnome.desktop.background picture-uri "file://$WALLPAPER_PATH"
 gsettings set org.gnome.desktop.background picture-uri-dark "file://$WALLPAPER_PATH"
 
+/home/akanksh/.local/bin/wal -i "$WALLPAPER_PATH"
+
+cp /home/akanksh/.cache/wal/colors-ghostty /home/akanksh/.config/ghostty/themes/colors-ghostty
+rm /home/akanksh/.cache/wal/colors-ghostty
 # Use pywal to set the terminal theme
-wal -i "$WALLPAPER_PATH"
 
 echo "Wallpaper set to: $WALLPAPER_PATH"
