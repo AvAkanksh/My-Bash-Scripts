@@ -43,7 +43,7 @@ if [ -n "$1" ] && [ -f "$1" ]; then
     URL=$(upload_to_0x0 "$1")
 else
     # Handle clipboard content
-    TMP_FILE=$(mktemp /tmp/clipboard_content.XXXXXX)
+    TMP_FILE=$(mktemp /tmp/clipboard_content.XXX)
 
     # Check if the clipboard contains a file path
     CLIPBOARD_CONTENT=$(xclip -o -selection clipboard 2>/dev/null)
@@ -88,8 +88,8 @@ else
         URL=$(upload_to_0x0 "$TMP_FILE")
 
         # Clean up the temporary file
-        rm "$TMP_FILE"
-        echo "Temporary file removed."
+        # rm "$TMP_FILE"
+        # echo "Temporary file removed."
     fi
 fi
 
