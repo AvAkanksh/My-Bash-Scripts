@@ -30,6 +30,12 @@ send_notification() {
     fi
 }
 
+# Function to expand ~ to the full home directory path
+expand_path() {
+    local path="$1"
+    echo "${path/#\~/$HOME}"
+}
+
 # Check if a file path is provided as an argument
 if [ -n "$1" ] && [ -f "$1" ]; then
     # Upload the provided file
@@ -41,6 +47,9 @@ else
 
     # Check if the clipboard contains a file path
     CLIPBOARD_CONTENT=$(xclip -o -selection clipboard 2>/dev/null)
+
+    # Expand ~ to the full home directory path
+    CLIPBOARD_CONTENT=$(expand_path "$CLIPBOARD_CONTENT")
 
     if [ -f "$CLIPBOARD_CONTENT" ]; then
         # If it's a file, upload it directly
