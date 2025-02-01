@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# Function to upload a file to 0x0.st and get the URL
+upload_to_0x0() {
+    local file_path="$1"
+    curl -s -F "file=@$file_path" https://0x0.st
+}
+
+# Function to copy text to the clipboard
+copy_to_clipboard() {
+    local text="$1"
+    if command -v xclip &>/dev/null; then
+        echo -n "$text" | xclip -selection clipboard
+    elif command -v wl-copy &>/dev/null; then
+        echo -n "$text" | wl-copy
+    else
+        echo "Error: No clipboard tool found (install xclip or wl-clipboard)."
+        exit 1
+    fi
+}
+
+# Function to send a desktop notification
+send_notification() {
+    local title="$1"
+    local message="$2"
+    if command -v notify-send &>/dev/null; then
+        notify-send "$title" "$message"
+    else
+        echo "Error: notify-send not found. Install libnotify to enable notifications."
+    fi
+}
+
+# Check if a file path is provided as an argument
+if [ -n "$1" ] && [ -f "$1" ]; then
+    # Upload the provided file
+    echo "Uploading file: $1"
+    URL=$(upload_to_0x0 "$1")
+else
+    # Handle clipboard content
+    TMP_FILE=$(mktemp /tmp/clipboard_content.XXXXXX)
+
+    # Check if the clipboard contains a file path
+    CLIPBOARD_CONTENT=$(xclip -o -selection clipboard 2>/dev/null)
+
+    if [ -f "$CLIPBOARD_CONTENT" ]; then
+        # If it's a file, upload it directly
+        echo "Uploading file from clipboard: $CLIPBOARD_CONTENT"
+        URL=$(upload_to_0x0 "$CLIPBOARD_CONTENT")
+    else
+        # Handle different clipboard formats
+        CLIPBOARD_FORMATS=$(xclip -o -selection clipboard -t TARGETS 2>/dev/null)
+
+        # Determine the clipboard format and save accordingly
+        if echo "$CLIPBOARD_FORMATS" | grep -q "image/png"; then
+            xclip -o -selection clipboard -t image/png > "$TMP_FILE"
+            echo "Saved PNG image from clipboard to $TMP_FILE"
+        elif echo "$CLIPBOARD_FORMATS" | grep -q "image/jpeg"; then
+            xclip -o -selection clipboard -t image/jpeg > "$TMP_FILE"
+            echo "Saved JPEG image from clipboard to $TMP_FILE"
+        elif echo "$CLIPBOARD_FORMATS" | grep -q "image/gif"; then
+            xclip -o -selection clipboard -t image/gif > "$TMP_FILE"
+            echo "Saved GIF image from clipboard to $TMP_FILE"
+        elif echo "$CLIPBOARD_FORMATS" | grep -q "text/plain"; then
+            xclip -o -selection clipboard -t text/plain > "$TMP_FILE"
+            echo "Saved plain text from clipboard to $TMP_FILE"
+        elif echo "$CLIPBOARD_FORMATS" | grep -q "text/html"; then
+            xclip -o -selection clipboard -t text/html > "$TMP_FILE"
+            echo "Saved HTML from clipboard to $TMP_FILE"
+        elif echo "$CLIPBOARD_FORMATS" | grep -q "application/octet-stream"; then
+            xclip -o -selection clipboard -t application/octet-stream > "$TMP_FILE"
+            echo "Saved binary data from clipboard to $TMP_FILE"
+        else
+            xclip -o -selection clipboard > "$TMP_FILE"
+            echo "Saved raw clipboard content to $TMP_FILE"
+        fi
+
+        # Upload the temporary file to 0x0.st
+        echo "Uploading file to 0x0.st..."
+        URL=$(upload_to_0x0 "$TMP_FILE")
+
+        # Clean up the temporary file
+        rm "$TMP_FILE"
+        echo "Temporary file removed."
+    fi
+fi
+
+# Output the URL, copy it to the clipboard, and send a notification
+if [ -n "$URL" ]; then
+    echo "File uploaded successfully. URL: $URL"
+    copy_to_clipboard "$URL"
+    echo "URL copied to clipboard."
+    send_notification "File Uploaded" "URL: $URL"
+else
+    echo "Failed to upload file to 0x0.st."
+    send_notification "File Upload Failed" "Check the terminal for details."
+    exit 1
+fi
