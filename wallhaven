@@ -1,10 +1,67 @@
 #!/bin/bash
 
-for page in {1..3};do
-urls=$(curl -s "https://wallhaven.cc/api/v1/search?q=$1&purity=100&ratios=landscape,16x9,16x10&sorting=views&categories=110&page=$page&apikey=pgImy4me0OJwPtR9nssFcOjcEV1GrOU4" | jq -r ".data[] .path")
-for url in $urls
-do
-aria2c --continue=true -d /home/akanksh/Pictures/wall $url
-done
-done
+# Configuration
+API_KEY="pgImy4me0OJwPtR9nssFcOjcEV1GrOU4"
+DOWNLOAD_DIR="/home/akanksh/Pictures/wall"
+SEARCH_QUERY="$1"
+MAX_PAGES=3
 
+# Function to fetch wallpaper URLs from a specific page
+fetch_wallpaper_urls() {
+    local page="$1"
+    local api_url="https://wallhaven.cc/api/v1/search?q=$SEARCH_QUERY&purity=100&ratios=landscape,16x9,16x10&sorting=views&categories=110&page=$page&apikey=$API_KEY"
+    
+    echo "Fetching wallpaper URLs from page $page..."
+    curl -s "$api_url" | jq -r ".data[] .path"
+}
+
+# Function to download a wallpaper
+download_wallpaper() {
+    local url="$1"
+    echo "Downloading: $url"
+    aria2c --continue=true -d "$DOWNLOAD_DIR" "$url"
+}
+
+# Function to validate dependencies
+validate_dependencies() {
+    local dependencies=("curl" "jq" "aria2c")
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            echo "Error: $dep is not installed. Please install it and try again."
+            exit 1
+        fi
+    done
+}
+
+# Main function
+main() {
+    # Validate dependencies
+    validate_dependencies
+
+    # Check if search query is provided
+    if [[ -z "$SEARCH_QUERY" ]]; then
+        echo "Error: Please provide a search query as an argument."
+        exit 1
+    fi
+
+    # Create download directory if it doesn't exist
+    mkdir -p "$DOWNLOAD_DIR"
+
+    # Loop through pages and download wallpapers
+    for ((page = 1; page <= MAX_PAGES; page++)); do
+        urls=$(fetch_wallpaper_urls "$page")
+        if [[ -z "$urls" ]]; then
+            echo "No wallpapers found on page $page."
+            continue
+        fi
+
+        for url in $urls; do
+            download_wallpaper "$url"
+        done
+    done
+
+    echo "Download complete. Wallpapers saved to: $DOWNLOAD_DIR"
+}
+
+# Run the script
+main

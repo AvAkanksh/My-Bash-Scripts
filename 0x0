@@ -25,4 +25,3 @@ echo "Pushing the image '$file_path': $last_file  to 0x0.st"
 curl -s -F"file=@$file_path/$last_file" https://0x0.st | xclip -selection clipboard
 
 echo "Copied the link to the clipboard!!!"
-
