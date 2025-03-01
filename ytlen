@@ -1,6 +1,6 @@
 #!/bin/bash
 
-playListId=$(echo $1 | grep -oE 'list\\?=[A-Za-z_0-9]*' | awk -F"=" '{print $2}')
+playListId=$(echo $1 | grep -oE 'list\\?=[A-Za-z_0-9-]*' | awk -F"=" '{print $2}')
 #curl -s -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "search_string=$url" "https://ytplaylist-len.sharats.dev/" | pup '--color' "div.container div.content p json{}" | jq -r '.[].text'
 echo "Playlist Id :" $playListId
 curl -s -d "url=$playListId" "https://yt-playlist-len.vercel.app/" | pup --color "pre text{}"
