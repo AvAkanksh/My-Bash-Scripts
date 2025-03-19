@@ -1,0 +1,30 @@
+#!/usr/bin/bash
+
+# Log file
+LOG_FILE="/tmp/bluetooth_script.log"
+
+# MAC address of your Bluetooth earphones
+MAC_ADDRESS="08:12:87:28:20:A8"
+
+# Full path to bluetoothctl
+BLUETOOTHCTL="/usr/bin/bluetoothctl"
+
+# Function to check if the device is connected
+is_connected() {
+    $BLUETOOTHCTL info "$MAC_ADDRESS" | grep -q "Connected: yes"
+}
+
+# Log the start of the script
+echo "Script started at $(date)" >> "$LOG_FILE"
+
+# Toggle the connection
+if is_connected; then
+    echo "Device is connected. Disconnecting..." >> "$LOG_FILE"
+    echo -e "disconnect $MAC_ADDRESS\nquit" | $BLUETOOTHCTL >> "$LOG_FILE" 2>&1
+else
+    echo "Device is disconnected. Connecting..." >> "$LOG_FILE"
+    echo -e "power on\nconnect $MAC_ADDRESS\nquit" | $BLUETOOTHCTL >> "$LOG_FILE" 2>&1
+fi
+
+# Log the end of the script
+#echo "Script finished at $(date)" >> "$LOG_FILE"

@@ -1,0 +1,16 @@
+#!/usr/bin/bash
+# Toggle between the current and previous window in i3
+
+# Get the current window ID
+CURRENT_WINDOW=$(i3-msg -t get_tree | jq -r 'recurse(.nodes[], .floating_nodes[];.nodes!=null) | select(.focused==true).id')
+
+# Get the previously focused window ID
+PREV_WINDOW=$(i3-msg -t get_tree | jq -r 'recurse(.nodes[], .floating_nodes[];.nodes!=null) | select(.focused==false and .visible==true) | .id' | tail -n 1)
+
+# Check if PREV_WINDOW is not empty and is different from CURRENT_WINDOW
+if [[ -n "$PREV_WINDOW" && "$PREV_WINDOW" != "$CURRENT_WINDOW" ]]; then
+    i3-msg "[con_id=\"$PREV_WINDOW\"] focus"
+else
+    # If no previous window is found, do nothing or notify the user
+    notify-send "i3 Toggle Window" "No previous window found."
+fi

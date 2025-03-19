@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Directory containing wallpapers
+WALLPAPER_DIR="$HOME/Pictures/wall"
+
+# Check if the directory exists
+if [ ! -d "$WALLPAPER_DIR" ]; then
+  echo "Wallpaper directory not found: $WALLPAPER_DIR"
+  exit 1
+fi
+
+# Pick a random image from the directory
+WALLPAPER=$(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.png" -o -iname "*.jpeg" \) | shuf -n 1)
+
+# Check if a wallpaper was found
+if [ -z "$WALLPAPER" ]; then
+  echo "No valid images found in $WALLPAPER_DIR"
+  exit 1
+fi
+
+# Set wallpaper using feh
+feh --bg-fill "$WALLPAPER"
+/usr/bin/cp -f $WALLPAPER /usr/share/endeavouros/backgrounds/endeavouros-wallpaper.png
+
+# Apply terminal theme using hellwal
+if command -v wal &> /dev/null; then
+  wal -i "$WALLPAPER" 
+else
+  echo "pywal (wal) is not installed. Please install it to apply terminal themes."
+fi
+
+# Save the wallpaper and theme settings
+echo "$WALLPAPER" > "$HOME/.cache/current_wallpaper"
