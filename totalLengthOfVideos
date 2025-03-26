@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# Ensure robust error handling
+set -euo pipefail
+
+# Check if required tools are installed
+check_dependency() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "Error: $1 is not installed. Please install it first."
+        exit 1
+    fi
+}
+
+# Check dependencies
+check_dependency ffprobe
+check_dependency parallel
+check_dependency bc
+
+# Get folder path from argument or use current directory
+FOLDER_PATH="${1:-.}"
+
+# Validate directory
+if [ ! -d "$FOLDER_PATH" ]; then
+    echo "Error: Directory '$FOLDER_PATH' does not exist"
+    exit 1
+fi
+
+# Create and manage temporary file safely
+temp_file=$(mktemp)
+trap 'rm -f "$temp_file"' EXIT
+
+# Find video files (case-insensitive)
+echo "Scanning directory: $(realpath "$FOLDER_PATH")"
+echo "Looking for video files"
+
+# Find files with case-insensitive extensions
+find "$FOLDER_PATH" \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.avi" -o \
+                       -iname "*.mov" -o -iname "*.wmv" -o -iname "*.flv" -o \
+                       -iname "*.webm" -o -iname "*.m4v" \) > "$temp_file"
+
+# Function to safely get duration of a single file
+get_duration() {
+    local file="$1"
+    local duration=0
+
+    # Use robust error handling for ffprobe
+    if duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null); then
+        # Validate that duration is a number
+        if [[ "$duration" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "$duration"
+        else
+            echo "0"
+        fi
+    else
+        echo "0"
+    fi
+}
+export -f get_duration
+
+# Count and validate videos
+total_videos=$(wc -l < "$temp_file")
+echo "Found $total_videos video file(s)"
+
+# Display first few files if any exist
+if [ $total_videos -gt 0 ]; then
+    echo "Sample of found files (first 5):"
+    head -n 5 "$temp_file"
+fi
+
+# Calculate total duration safely
+total_seconds=$(parallel -j+0 get_duration < "$temp_file" | awk '{sum += $1} END {print sum+0}')
+
+# Ensure total_seconds is a valid number
+total_seconds=${total_seconds:-0}
+
+# Conversion functions with error handling
+convert_to_hm() {
+    local seconds=$1
+    local hours minutes
+    
+    hours=$(printf "%.0f" "$(echo "$seconds / 3600" | bc)")
+    minutes=$(printf "%.0f" "$(echo "($seconds % 3600) / 60" | bc)")
+    
+    echo "$hours hours $minutes minutes"
+}
+
+convert_to_decimal() {
+    local seconds=$1
+    printf "%.1f" "$(echo "scale=1; $seconds / 3600" | bc)"
+}
+
+# Calculate statistics only if videos exist
+if [ $total_videos -gt 0 ]; then
+    avg_minutes=$(printf "%.1f" "$(echo "scale=1; $total_seconds / $total_videos / 60" | bc)")
+else
+    avg_minutes="0.0"
+fi
+
+# Calculate total duration components
+total_hours=$(printf "%.0f" "$(echo "$total_seconds / 3600" | bc)")
+remaining_minutes=$(printf "%.0f" "$(echo "($total_seconds % 3600) / 60" | bc)")
+
+# Playback speed calculations
+speeds=(1.25 1.50 1.75 2.00)
+
+# Output results
+echo "Number of videos: $total_videos"
+echo "Average video length: $avg_minutes minutes"
+echo "Total playlist length: $total_hours hours $remaining_minutes minutes"
+
+# Dynamic speed calculations
+for speed in "${speeds[@]}"; do
+    reduced_time=$(convert_to_decimal "$(echo "$total_seconds / $speed" | bc)")
+    echo "At ${speed}x: $reduced_time hours"
+done
