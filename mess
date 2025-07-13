@@ -1,0 +1,103 @@
+#!/bin/bash
+
+# ANSI color codes
+GREEN="\033[1;32m"
+BLUE="\033[1;34m"
+YELLOW="\033[1;33m"
+CYAN="\033[1;36m"
+RED="\033[1;31m"
+RESET="\033[0m"
+
+# API endpoint
+URL="https://gymkhana.iitb.ac.in/instiapp/api/mess"
+
+# Get today's day of the week (Monday=1, Sunday=7)
+TODAY=$(date +%u)
+
+# Parse optional day offset argument (e.g., +1, -1, defaults to 0)
+OFFSET=0
+if [ $# -eq 1 ]; then
+    if [[ $1 =~ ^[+-][0-9]+$ ]]; then
+        OFFSET=$1
+    else
+        echo -e "${RED}Error: Invalid offset format. Use +x or -x (e.g., +1, -1).${RESET}"
+        exit 1
+    fi
+fi
+
+# Calculate target day (1 to 7)
+# Add offset to today, adjust for week wrap-around, ensure 1-7 range
+TARGET_DAY=$(( (TODAY + OFFSET - 1) % 7 + 1 ))
+if [ $TARGET_DAY -le 0 ]; then
+    TARGET_DAY=$(( TARGET_DAY + 7 ))
+fi
+
+# Calculate target date for display
+TARGET_DATE=$(date -d "$OFFSET days" '+%A, %B %d, %Y' 2>/dev/null)
+if [ $? -ne 0 ]; then
+    # Fallback for systems where date -d is not supported (e.g., macOS)
+    TARGET_DATE=$(date -v "${OFFSET}d" '+%A, %B %d, %Y' 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        TARGET_DATE="Day offset $OFFSET from $(date '+%A, %B %d, %Y')"
+    fi
+fi
+
+# Fetch data from the API
+DATA=$(curl -s "$URL" 2>/dev/null)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Error: Failed to fetch data from API${RESET}"
+    exit 1
+fi
+
+# Check if data is empty or invalid
+if [ -z "$DATA" ]; then
+    echo -e "${RED}Error: No data received from API${RESET}"
+    exit 1
+fi
+
+# Find Hostel 12 and the meal for the target day
+MEAL=$(echo "$DATA" | jq -r --argjson day "$TARGET_DAY" '.[] | select(.short_name == "12") | .mess[] | select(.day == $day)')
+if [ -z "$MEAL" ]; then
+    echo -e "${RED}Error: No meal data found for Hostel 12 on day $TARGET_DAY${RESET}"
+    exit 1
+fi
+
+# Extract meal details
+BREAKFAST=$(echo "$MEAL" | jq -r '.breakfast')
+LUNCH=$(echo "$MEAL" | jq -r '.lunch')
+SNACKS=$(echo "$MEAL" | jq -r '.snacks')
+DINNER=$(echo "$MEAL" | jq -r '.dinner')
+
+# Function to split text into lines and store in an array
+split_into_lines() {
+    local text="$1"
+    echo "$text" | tr '\n' '|' | fold -s -w 23 | tr '|' '\n'
+}
+
+# Convert meal data into arrays of lines
+IFS=$'\n' read -d '' -r -a breakfast_lines <<< "$(split_into_lines "$BREAKFAST")"
+IFS=$'\n' read -d '' -r -a lunch_lines <<< "$(split_into_lines "$LUNCH")"
+IFS=$'\n' read -d '' -r -a snacks_lines <<< "$(split_into_lines "$SNACKS")"
+IFS=$'\n' read -d '' -r -a dinner_lines <<< "$(split_into_lines "$DINNER")"
+
+# Find the maximum number of lines to ensure even table rows
+max_lines=$((${#breakfast_lines[@]}))
+[ ${#lunch_lines[@]} -gt $max_lines ] && max_lines=${#lunch_lines[@]}
+[ ${#snacks_lines[@]} -gt $max_lines ] && max_lines=${#snacks_lines[@]}
+[ ${#dinner_lines[@]} -gt $max_lines ] && max_lines=${#dinner_lines[@]}
+
+# Print the title
+echo -e "${GREEN}Meals for Hostel 12 (Crown of the Campus) - $TARGET_DATE${RESET}\n"
+
+# Print table header
+printf "${BLUE}%-25s${YELLOW}%-25s${CYAN}%-25s${BLUE}%-25s${RESET}\n" "Breakfast" "Lunch" "Snacks" "Dinner"
+printf "%s\n" "------------------------------------------------------------------------------------------------"
+
+# Print table rows
+for ((i=0; i<max_lines; i++)); do
+    b=${breakfast_lines[$i]:-}
+    l=${lunch_lines[$i]:-}
+    s=${snacks_lines[$i]:-}
+    d=${dinner_lines[$i]:-}
+    printf "%-25s%-25s%-25s%-25s\n" "$b" "$l" "$s" "$d"
+done
