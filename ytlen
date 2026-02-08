@@ -1,21 +1,85 @@
 #!/bin/bash
 
 # Check if an argument is provided
-if [ -z "$1" ]; then
-  echo "Error: No URL provided. Usage: $0 <YouTube_URL>"
-  exit 1
-fi
+#if [ -z "$1" ]; then
+#  echo "Error: No URL provided. Usage: $0 <YouTube_URL>"
+#  exit 1
+#fi
 
 # Extract playlist ID from URL
+#playListId=$(echo "$1" | grep -oE 'list=[A-Za-z0-9_-]+' | cut -d'=' -f2)
+
+# Check if playlist ID was extracted
+#if [ -z "$playListId" ]; then
+#  echo "Error: Could not extract playlist ID from URL"
+#  exit 1
+#fi
+
+#echo "Playlist Id: $playListId"
+
+# Fetch and parse playlist length
+#curl -s -d "url=$playListId" "https://yt-playlist-len.vercel.app/" | pup --color "pre text{}"
+
+
+
+#!/bin/bash
+
+# Check if an argument is provided
+if [ -z "$1" ]; then
+    echo "Error: No URL provided. Usage: $0 <YouTube_URL>"
+    exit 1
+fi
+
+# Extract playlist ID from URL (Robust regex to catch common formats)
 playListId=$(echo "$1" | grep -oE 'list=[A-Za-z0-9_-]+' | cut -d'=' -f2)
 
 # Check if playlist ID was extracted
 if [ -z "$playListId" ]; then
-  echo "Error: Could not extract playlist ID from URL"
-  exit 1
+    echo "Error: Could not extract playlist ID from URL"
+    exit 1
 fi
 
-echo "Playlist Id: $playListId"
+# Construct a clean URL for the API payload
+cleanUrl="https://www.youtube.com/playlist?list=$playListId"
 
-# Fetch and parse playlist length
-curl -s -d "url=$playListId" "https://yt-playlist-len.vercel.app/" | pup --color "pre text{}"
+echo "---------------------------------------------------"
+echo "Fetching details for Playlist ID: $playListId"
+echo "---------------------------------------------------"
+
+# Fetch data from the new API
+# We capture the output into a variable to parse it locally
+response=$(curl --silent --location 'https://ytplaylist-len.sharats.dev/' \
+    --header 'Content-Type: application/x-www-form-urlencoded' \
+    --data-urlencode "search_string=$cleanUrl" \
+    --data-urlencode 'range_start=' \
+    --data-urlencode 'range_end=' \
+    --data-urlencode 'custom_speed=' \
+    --data-urlencode 'youtube_api=')
+
+# Check if curl failed (empty response)
+if [ -z "$response" ]; then
+    echo "Error: No response from server."
+    exit 1
+fi
+
+# Parse the HTML output
+# 1. sed: cleans up the specific HTML tags (<p> and </div> etc)
+# 2. grep: filters only the lines containing relevant info
+# 3. sed: removes leading/trailing whitespace and HTML entities if any
+
+echo "$response" | \
+sed -n 's/<[^>]*>//g; p' | \
+grep -E "Playlist :|Creator :|Video count :|Average video length :|Total length :|At [0-9.]+" | \
+sed -e 's/^[ \t]*//' | \
+while read -r line; do
+    # Formatting: Make the Labels Bold (using ANSI escape codes)
+    if [[ "$line" == *"Playlist :"* ]]; then
+        echo -e "\033[1;34m$line\033[0m" # Blue for Title
+    elif [[ "$line" == *"Total length :"* ]]; then
+        echo -e "\033[1;32m$line\033[0m" # Green for Total Length
+    else
+        echo "$line"
+    fi
+done
+
+echo "---------------------------------------------------"

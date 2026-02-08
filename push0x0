@@ -3,7 +3,9 @@
 filename=$1
 
 if [[ -f "$filename" ]]; then
-  curl -s -F"file=@$filename" https://0x0.st | xclip -selection clipboard
+  #curl -s -F"file=@$filename" https://0x0.st | xclip -selection clipboard
+  echo $filename
+  curl -F"file=@$filename" https://0x0.st 
   echo "The link is copied to the clipboard!!!"
 else
   echo "Error: File '$filename' not found."
