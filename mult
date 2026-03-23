@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+
+import random
+import time
+import os
+import sys
+import shutil
+
+# ===============================
+# CROSS-PLATFORM KEY INPUT
+# ===============================
+try:
+    import msvcrt  # Windows
+    def get_char():
+        return msvcrt.getch().decode("utf-8")
+except ImportError:
+    import tty, termios  # Linux / macOS
+    def get_char():
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return ch
+
+
+# ===============================
+# COLORS
+# ===============================
+class Colors:
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    CLEAR = "\033[H\033[J"
+
+
+# ===============================
+# TERMINAL HELPERS
+# ===============================
+def clear_screen():
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        print(Colors.CLEAR, end="")
+
+def get_terminal_size():
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return size.columns, size.lines
+
+def print_centered_block(lines):
+    width, height = get_terminal_size()
+    block_height = len(lines)
+    top_padding = max((height - block_height) // 2, 0)
+
+    print("\n" * top_padding, end="")
+    for line in lines:
+        print(line.center(width))
+
+
+# ===============================
+# UI BLOCKS
+# ===============================
+def header_block(q, total, correct):
+    return [
+        f"{Colors.HEADER}{'=' * 42}{Colors.RESET}",
+        f"{Colors.BOLD}MULTIPLICATION DOJO{Colors.RESET}  |  {correct} Correct",
+        f"Question {q} / {total}",
+        f"{Colors.HEADER}{'=' * 42}{Colors.RESET}",
+        ""
+    ]
+
+def end_block(total_time, correct, total_q):
+    lines = [
+        f"{Colors.HEADER}{'=' * 42}{Colors.RESET}",
+        f"{Colors.BOLD}SESSION COMPLETE{Colors.RESET}",
+        f"{Colors.HEADER}{'=' * 42}{Colors.RESET}",
+        "",
+        f"Total Time : {Colors.BOLD}{round(total_time, 2)}s{Colors.RESET}",
+    ]
+
+    if correct > 0:
+        lines.append(
+            f"Avg / Q    : {Colors.BOLD}{round(total_time / correct, 2)}s{Colors.RESET}"
+        )
+    else:
+        lines.append("Avg / Q    : N/A")
+
+    lines.append("")
+    lines.append(f"Accuracy   : {correct} / {total_q}")
+    return lines
+
+
+# ===============================
+# MAIN GAME
+# ===============================
+def start_practice():
+    clear_screen()
+    print_centered_block([
+        f"{Colors.BOLD}Welcome to Speed Math{Colors.RESET}",
+        "",
+        # "Press Enter to begin..."
+    ])
+    # input()
+
+    try:
+        practice_table = input("Which table do you want to practice? (default : 12) : ")
+        if not practice_table:
+            practice_table = 12
+        else:
+            practice_table = int(practice_table)
+        number_of_questions = input("How many questions? (default : 20) : ")
+        if not number_of_questions:
+            number_of_questions = 20
+        else:
+            number_of_questions = int(number_of_questions)
+    except ValueError:
+        print("Invalid input.")
+        return
+
+    correct = 0
+    start_time = time.time()
+
+    for q in range(1, number_of_questions + 1):
+
+        if practice_table == 12:
+            x = random.randint(11, 30)
+        else:
+            x = random.randint(11, 99)
+
+        answer = str(x * practice_table)
+        typed = ""
+
+        while True:
+            clear_screen()
+
+            ui = header_block(q, number_of_questions, correct)
+            ui.append(
+                f"{Colors.BOLD}{x}  ×  {practice_table}  =  "
+                f"{Colors.BLUE}{typed}{Colors.RESET}"
+            )
+
+            print_centered_block(ui)
+
+            # Correct
+            if typed == answer:
+                print_centered_block([
+                    "",
+                    f"{Colors.GREEN}✔ Correct!{Colors.RESET}"
+                ])
+                correct += 1
+                # time.sleep(0.4)
+                break
+
+            # Wrong length
+            if len(typed) >= len(answer):
+                print_centered_block([
+                    "",
+                    f"{Colors.RED}✘ Try Again{Colors.RESET}"
+                ])
+                # time.sleep(0.5)
+                typed = ""
+                continue
+
+            ch = get_char()
+
+            if ch in ("\x7f", "\x08"):  # Backspace
+                typed = typed[:-1]
+            elif ch == "\x03":  # Ctrl+C
+                sys.exit()
+            elif ch.isdigit():
+                typed += ch
+
+    total_time = time.time() - start_time
+    clear_screen()
+    print_centered_block(end_block(total_time, correct, number_of_questions))
+
+
+# ===============================
+# ENTRY POINT
+# ===============================
+if __name__ == "__main__":
+    start_practice()
