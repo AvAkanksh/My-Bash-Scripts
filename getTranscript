@@ -1,39 +1,69 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Ensure jq is available for JSON formatting (optional)
-format_json=false
-if command -v jq &>/dev/null; then
-    format_json=true
-fi
+URL="$1"
+LANG="en"
 
-# Function to print usage
-usage() {
-    echo "Usage: $0 <video_url>"
-    exit 1
-}
-
-# Check if a URL is provided as an argument
-[ -z "$1" ] && usage
-
-# Input parameters
-VIDEO_URL="$1"
-API_URL="https://tactiq-apps-prod.tactiq.io/transcript"
-
-# Make the POST request using curl
-response=$(curl -s -X POST "$API_URL" \
-    -H "Content-Type: application/json" \
-    -d "{\"videoUrl\": \"$VIDEO_URL\", \"langCode\": \"en\"}")
-
-# Check for errors in the response
-if [ -z "$response" ]; then
-    echo "Error: No response from the server. Please check your internet connection or API URL."
+if [ -z "$URL" ]; then
+    echo "❌ Usage: $0 <YouTube URL>"
     exit 1
 fi
 
-# Print the response
-echo "Transcript Response copied !"
-if $format_json; then
-    echo "$response" | jq -r '.captions[].text' | xclip -selection clipboard
+TMP_DIR=$(mktemp -d)
+TMP="$TMP_DIR/sub"
+
+yt-dlp --write-auto-subs --sub-lang "$LANG" \
+       --skip-download --sub-format vtt \
+       -o "$TMP" "$URL" > /dev/null 2>&1
+
+SUB_FILE=$(ls "$TMP_DIR"/*.vtt 2>/dev/null | head -n1)
+
+if [ ! -f "$SUB_FILE" ]; then
+    echo "❌ No subtitles found. Try checking the URL or language code."
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
+
+CLEANED=$(mktemp)
+
+awk '
+    /^WEBVTT/    { next }
+    /^NOTE/      { skip=1; next }
+    /^Kind:/     { next }
+    /^Language:/ { next }
+    /^$/         { skip=0; next }
+    skip         { next }
+    /-->/        { next }
+    {
+        gsub(/<[^>]+>/, "")
+        gsub(/&gt;/, ">")
+        gsub(/&lt;/, "<")
+        gsub(/&amp;/, "and")
+        gsub(/&nbsp;/, " ")
+        gsub(/\[[^\]]*\]/, "")
+        gsub(/^[> \t]+/, "")
+        gsub(/^[ \t]+|[ \t]+$/, "")
+        gsub(/  +/, " ")
+        if ($0 == "") next
+        if ($0 != prev) {
+            print $0
+            prev = $0
+        }
+    }
+' "$SUB_FILE" > "$CLEANED"
+
+if command -v wl-copy >/dev/null && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+    wl-copy < "$CLEANED"
+    echo "✅ Copied using wl-copy (Wayland)"
+elif command -v xclip >/dev/null; then
+    xclip -selection clipboard < "$CLEANED"
+    echo "✅ Copied using xclip (X11)"
+elif command -v xsel >/dev/null; then
+    xsel --clipboard < "$CLEANED"
+    echo "✅ Copied using xsel"
 else
-    echo "$response"
+    echo "⚠️  No clipboard tool found — printing to stdout:"
+    cat "$CLEANED"
 fi
+
+rm -rf "$TMP_DIR"
+rm -f "$CLEANED"
