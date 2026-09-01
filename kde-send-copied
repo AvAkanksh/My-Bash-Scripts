@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -e
+
+# Get the copied file URI from the clipboard
+if command -v wl-paste >/dev/null 2>&1; then
+    URI=$(wl-paste --no-newline --type text/uri-list 2>/dev/null | head -n 1)
+elif command -v xclip >/dev/null 2>&1; then
+    URI=$(xclip -selection clipboard -o -t text/uri-list 2>/dev/null | head -n 1)
+else
+    notify-send "KDE Connect" "Install wl-clipboard or xclip first."
+    exit 1
+fi
+
+# Make sure something was copied
+if [[ -z "$URI" ]]; then
+    notify-send "KDE Connect" "No file found in clipboard."
+    exit 1
+fi
+
+# Convert file:// URI to a normal path
+FILE=$(printf '%s' "$URI" | sed 's/^file:\/\///' | sed 's/%20/ /g')
+
+# Check that it is actually a file
+if [[ ! -f "$FILE" ]]; then
+    notify-send "KDE Connect" "Copied item is not a valid file."
+    exit 1
+fi
+
+# Find a reachable KDE Connect device
+DEVICE=$(kdeconnect-cli -a 2>/dev/null | \
+    awk -F ': ' '/reachable: yes/ {print $1; exit}')
+
+if [[ -z "$DEVICE" ]]; then
+    notify-send "KDE Connect" "No reachable KDE Connect device found."
+    exit 1
+fi
+
+# Send the file
+kdeconnect-cli --device "$DEVICE" --share "$FILE"
+
+notify-send "KDE Connect" "Sent: $(basename "$FILE")"

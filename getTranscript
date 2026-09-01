@@ -51,15 +51,38 @@ awk '
     }
 ' "$SUB_FILE" > "$CLEANED"
 
+# if command -v wl-copy >/dev/null && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+#     wl-copy < "$CLEANED"
+#     notify-send "✅ Copied using wl-copy (Wayland)"
+# elif command -v xclip >/dev/null; then
+#     xclip -selection clipboard < "$CLEANED"
+#     notify-send "✅ Copied using xclip (X11)"
+# elif command -v xsel >/dev/null; then
+#     xsel --clipboard < "$CLEANED"
+#     notify-send "✅ Copied using xsel"
+# else
+#     notify-send "⚠️  No clipboard tool found — printing to stdout:"
+#     cat "$CLEANED"
+# fi
+
+NOTIFY="notify-send"
+if ! command -v notify-send >/dev/null; then
+    NOTIFY="echo"
+fi
+
+# Copy to clipboard
 if command -v wl-copy >/dev/null && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
     wl-copy < "$CLEANED"
-    echo "✅ Copied using wl-copy (Wayland)"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+        $NOTIFY "Transcript Copied" "Ready to paste!" --icon=edit-copy
 elif command -v xclip >/dev/null; then
     xclip -selection clipboard < "$CLEANED"
-    echo "✅ Copied using xclip (X11)"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+        $NOTIFY "Transcript Copied" "Ready to paste!" --icon=edit-copy
 elif command -v xsel >/dev/null; then
     xsel --clipboard < "$CLEANED"
-    echo "✅ Copied using xsel"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+        $NOTIFY "Transcript Copied" "Ready to paste!" --icon=edit-copy
 else
     echo "⚠️  No clipboard tool found — printing to stdout:"
     cat "$CLEANED"
