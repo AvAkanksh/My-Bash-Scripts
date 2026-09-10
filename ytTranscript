@@ -19,7 +19,7 @@ PYTHON_BIN="$VENV_DIR/bin/python"
 HELPER="$CACHE_DIR/transcript_helper.py"
 
 LANG_CODE="en"
-JOBS=4
+JOBS=10
 OUTPUT=""
 DIR_OUT=""
 SINGLE=0
@@ -51,7 +51,7 @@ OPTIONS:
     -d, --dir DIR       Save playlist transcripts as separate files in DIR
     -s, --single        Combine playlist transcripts into a single file
     -l, --lang CODE     Transcript language code (default: en)
-    -j, --jobs N        Parallel workers for playlist fetching (default: 4)
+    -j, --jobs N        Parallel workers for playlist fetching (default: 10)
     -q, --quiet         Suppress progress output
     -h, --help          Show this help and exit
 
@@ -317,6 +317,9 @@ if printf '%s' "$URL" | grep -q 'list='; then
         for f in "$WORK_DIR"/*.err; do
             [ -s "$f" ] && sed 's/^/  /' "$f" >&2
         done
+        if grep -qsl "blocking requests from your IP" "$WORK_DIR"/*.err 2>/dev/null; then
+            log "⚠️  YouTube is rate-limiting this IP. Retry later and/or lower -j (e.g. -j 3)."
+        fi
     fi
 
     if [ -n "$DIR_OUT" ]; then
