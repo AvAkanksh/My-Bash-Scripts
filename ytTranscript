@@ -25,6 +25,15 @@ DIR_OUT=""
 SINGLE=0
 QUIET=0
 
+# Proxy config (works around YouTube IP-blocking/rate-limiting), can also
+# be set via env vars so you don't have to pass them on every run.
+WEBSHARE_USER="${YTT_WEBSHARE_USER:-}"
+WEBSHARE_PASS="${YTT_WEBSHARE_PASS:-}"
+WEBSHARE_LOCATIONS="${YTT_WEBSHARE_LOCATIONS:-}"
+PROXY_URL="${YTT_PROXY:-}"
+PROXY_HTTP="${YTT_PROXY_HTTP:-}"
+PROXY_HTTPS="${YTT_PROXY_HTTPS:-}"
+
 usage() {
     cat <<EOF
 ${SCRIPT_NAME} - fetch YouTube transcripts (single video or full playlist)
@@ -55,6 +64,28 @@ OPTIONS:
     -q, --quiet         Suppress progress output
     -h, --help          Show this help and exit
 
+PROXY (optional — use if you hit "IP blocked"/"rate-limited" errors):
+    YouTube may block or rate-limit an IP after enough requests. Route
+    requests through a proxy to work around this. CLI flags below can
+    also be set via the matching env var instead, so you only set them
+    once (e.g. in your shell rc).
+
+    --webshare-user USER      Webshare proxy username   (env: YTT_WEBSHARE_USER)
+    --webshare-pass PASS      Webshare proxy password   (env: YTT_WEBSHARE_PASS)
+    --webshare-locations CC,CC
+                               Limit Webshare IPs to these country codes
+                               (env: YTT_WEBSHARE_LOCATIONS)
+    --proxy URL                Generic proxy URL, used for both http/https
+                               (env: YTT_PROXY)
+    --proxy-http URL          Generic HTTP proxy URL   (env: YTT_PROXY_HTTP)
+    --proxy-https URL         Generic HTTPS proxy URL  (env: YTT_PROXY_HTTPS)
+
+    Webshare (https://www.webshare.io) requires a "Residential" proxy
+    package and is what the youtube-transcript-api README recommends,
+    since it rotates IPs automatically. Any other HTTP/HTTPS/SOCKS proxy
+    also works via --proxy / --proxy-http / --proxy-https. If both are
+    set, Webshare takes priority.
+
 EXAMPLES:
     ${SCRIPT_NAME} "https://youtu.be/dQw4w9WgXcQ"
         Copy this video's transcript to the clipboard.
@@ -67,6 +98,9 @@ EXAMPLES:
 
     ${SCRIPT_NAME} -s -o all.txt -j 8 "https://www.youtube.com/playlist?list=PLxxxx"
         Fetch with 8 parallel workers, combine into all.txt.
+
+    ${SCRIPT_NAME} --webshare-user U --webshare-pass P "https://youtu.be/dQw4w9WgXcQ"
+        Fetch through a Webshare rotating residential proxy.
 EOF
 }
 
@@ -95,6 +129,24 @@ while [ $# -gt 0 ]; do
             JOBS="$2"; shift 2 ;;
         -q|--quiet)
             QUIET=1; shift ;;
+        --webshare-user)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            WEBSHARE_USER="$2"; shift 2 ;;
+        --webshare-pass)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            WEBSHARE_PASS="$2"; shift 2 ;;
+        --webshare-locations)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            WEBSHARE_LOCATIONS="$2"; shift 2 ;;
+        --proxy)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            PROXY_URL="$2"; shift 2 ;;
+        --proxy-http)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            PROXY_HTTP="$2"; shift 2 ;;
+        --proxy-https)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            PROXY_HTTPS="$2"; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         --)
@@ -117,6 +169,19 @@ case "$JOBS" in
 esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be at least 1"
 
+if [ -n "$WEBSHARE_USER" ] || [ -n "$WEBSHARE_PASS" ]; then
+    [ -n "$WEBSHARE_USER" ] && [ -n "$WEBSHARE_PASS" ] \
+        || die "--webshare-user and --webshare-pass must both be set"
+fi
+
+# Hand the chosen proxy config to the python helper via env vars, so it
+# reaches every parallel worker too (they're spawned from this shell).
+export YTT_WEBSHARE_USER="$WEBSHARE_USER"
+export YTT_WEBSHARE_PASS="$WEBSHARE_PASS"
+export YTT_WEBSHARE_LOCATIONS="$WEBSHARE_LOCATIONS"
+export YTT_PROXY_HTTP="${PROXY_HTTP:-$PROXY_URL}"
+export YTT_PROXY_HTTPS="${PROXY_HTTPS:-$PROXY_URL}"
+
 # ---------------------------------------------------------------------------
 # Bootstrap python venv + youtube-transcript-api (once, cached)
 # ---------------------------------------------------------------------------
@@ -124,6 +189,7 @@ write_helper() {
     mkdir -p "$CACHE_DIR"
     cat > "$HELPER" <<'PYEOF'
 #!/usr/bin/env python3
+import os
 import sys
 
 from youtube_transcript_api import (
@@ -133,6 +199,30 @@ from youtube_transcript_api import (
     VideoUnavailable,
     CouldNotRetrieveTranscript,
 )
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+
+
+def build_proxy_config():
+    ws_user = os.environ.get("YTT_WEBSHARE_USER", "")
+    ws_pass = os.environ.get("YTT_WEBSHARE_PASS", "")
+    if ws_user and ws_pass:
+        locations = os.environ.get("YTT_WEBSHARE_LOCATIONS", "")
+        kwargs = {"proxy_username": ws_user, "proxy_password": ws_pass}
+        if locations:
+            kwargs["filter_ip_locations"] = [
+                loc.strip() for loc in locations.split(",") if loc.strip()
+            ]
+        return WebshareProxyConfig(**kwargs)
+
+    http_url = os.environ.get("YTT_PROXY_HTTP", "")
+    https_url = os.environ.get("YTT_PROXY_HTTPS", "")
+    if http_url or https_url:
+        return GenericProxyConfig(
+            http_url=http_url or https_url,
+            https_url=https_url or http_url,
+        )
+
+    return None
 
 
 def clean_lines(snippets):
@@ -155,7 +245,7 @@ def main():
     video_id = sys.argv[1]
     lang = sys.argv[2] if len(sys.argv) > 2 else "en"
 
-    api = YouTubeTranscriptApi()
+    api = YouTubeTranscriptApi(proxy_config=build_proxy_config())
     try:
         transcript = api.fetch(video_id, languages=[lang])
     except NoTranscriptFound:
@@ -205,9 +295,8 @@ ensure_env() {
         "$VENV_DIR/bin/pip" install --quiet youtube-transcript-api \
             || die "failed to install youtube-transcript-api"
     fi
-    if [ ! -f "$HELPER" ]; then
-        write_helper
-    fi
+    # Always rewrite so the helper stays in sync with this script's version.
+    write_helper
 }
 
 command -v yt-dlp >/dev/null 2>&1 || die "yt-dlp is required but not found"
@@ -318,7 +407,7 @@ if printf '%s' "$URL" | grep -q 'list='; then
             [ -s "$f" ] && sed 's/^/  /' "$f" >&2
         done
         if grep -qsl "blocking requests from your IP" "$WORK_DIR"/*.err 2>/dev/null; then
-            log "⚠️  YouTube is rate-limiting this IP. Retry later and/or lower -j (e.g. -j 3)."
+            log "⚠️  YouTube is rate-limiting this IP. Retry later, lower -j (e.g. -j 3), or use --proxy/--webshare-user+--webshare-pass (see --help)."
         fi
     fi
 
@@ -377,7 +466,12 @@ ERR="$TMP_ROOT/result.err"
 "$PYTHON_BIN" "$HELPER" "$VIDEO_ID" "$LANG_CODE" > "$RESULT" 2> "$ERR"
 rc=$?
 [ -s "$ERR" ] && sed 's/^/  /' "$ERR" >&2
-[ "$rc" -eq 0 ] || die "failed to fetch transcript for $VIDEO_ID"
+if [ "$rc" -ne 0 ]; then
+    if grep -qs "blocking requests from your IP" "$ERR" 2>/dev/null; then
+        log "⚠️  YouTube is rate-limiting this IP. Retry later, or use --proxy/--webshare-user+--webshare-pass (see --help)."
+    fi
+    die "failed to fetch transcript for $VIDEO_ID"
+fi
 [ -s "$RESULT" ] || die "transcript for $VIDEO_ID was empty"
 
 if [ -n "$OUTPUT" ]; then
