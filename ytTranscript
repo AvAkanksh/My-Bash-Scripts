@@ -33,6 +33,7 @@ WEBSHARE_LOCATIONS="${YTT_WEBSHARE_LOCATIONS:-}"
 PROXY_URL="${YTT_PROXY:-}"
 PROXY_HTTP="${YTT_PROXY_HTTP:-}"
 PROXY_HTTPS="${YTT_PROXY_HTTPS:-}"
+NO_FREE_PROXY=0
 
 usage() {
     cat <<EOF
@@ -64,11 +65,19 @@ OPTIONS:
     -q, --quiet         Suppress progress output
     -h, --help          Show this help and exit
 
-PROXY (optional — use if you hit "IP blocked"/"rate-limited" errors):
-    YouTube may block or rate-limit an IP after enough requests. Route
-    requests through a proxy to work around this. CLI flags below can
-    also be set via the matching env var instead, so you only set them
-    once (e.g. in your shell rc).
+PROXY (use if you hit "IP blocked"/"rate-limited" errors):
+    By default, every video is fetched directly. If YouTube blocks that
+    request and you haven't configured your own proxy, ${SCRIPT_NAME}
+    AUTOMATICALLY retries it through a free proxy pulled from
+    https://github.com/TheSpeedX/PROXY-List. Free proxies are unreliable
+    (most are dead), so this can be slow and isn't guaranteed to work —
+    it's a best-effort fallback, not a substitute for a real proxy.
+
+    --no-free-proxy           Disable the automatic free-proxy fallback
+                               (env: YTT_NO_FREE_PROXY=1)
+
+    For a reliable fix, configure your own proxy — this also disables
+    the free-proxy fallback automatically:
 
     --webshare-user USER      Webshare proxy username   (env: YTT_WEBSHARE_USER)
     --webshare-pass PASS      Webshare proxy password   (env: YTT_WEBSHARE_PASS)
@@ -147,6 +156,8 @@ while [ $# -gt 0 ]; do
         --proxy-https)
             [ $# -ge 2 ] || die "$1 requires an argument"
             PROXY_HTTPS="$2"; shift 2 ;;
+        --no-free-proxy)
+            NO_FREE_PROXY=1; shift ;;
         -h|--help)
             usage; exit 0 ;;
         --)
@@ -181,6 +192,15 @@ export YTT_WEBSHARE_PASS="$WEBSHARE_PASS"
 export YTT_WEBSHARE_LOCATIONS="$WEBSHARE_LOCATIONS"
 export YTT_PROXY_HTTP="${PROXY_HTTP:-$PROXY_URL}"
 export YTT_PROXY_HTTPS="${PROXY_HTTPS:-$PROXY_URL}"
+export YTT_CACHE_DIR="$CACHE_DIR"
+
+# By default, if YouTube blocks a request and no proxy was explicitly
+# configured, automatically fall back to a free proxy from
+# https://github.com/TheSpeedX/PROXY-List. Disable with --no-free-proxy.
+if [ -n "$WEBSHARE_USER" ] || [ -n "$YTT_PROXY_HTTP" ] || [ -n "$YTT_PROXY_HTTPS" ]; then
+    NO_FREE_PROXY=1
+fi
+export YTT_NO_FREE_PROXY="$NO_FREE_PROXY"
 
 # ---------------------------------------------------------------------------
 # Bootstrap python venv + youtube-transcript-api (once, cached)
@@ -192,14 +212,28 @@ write_helper() {
 import os
 import sys
 
+import concurrent.futures
+import random
+import time
+
+import requests
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
     CouldNotRetrieveTranscript,
+    RequestBlocked,
 )
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+
+FREE_PROXY_LIST_URL = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+PROXY_PROBE_URL = "https://www.youtube.com/robots.txt"
+PROXY_LIST_TTL = 6 * 3600
+GOOD_PROXY_TTL = 10 * 60
+PROBE_TIMEOUT = 5
+MAX_PROBE_CANDIDATES = 40
+PROBE_WORKERS = 20
 
 
 def build_proxy_config():
@@ -225,6 +259,107 @@ def build_proxy_config():
     return None
 
 
+def _cache_dir():
+    d = os.environ.get("YTT_CACHE_DIR") or os.path.expanduser("~/.cache/yt-transcript")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _proxy_list_path():
+    return os.path.join(_cache_dir(), "free_proxy_list.txt")
+
+
+def _good_proxy_path():
+    return os.path.join(_cache_dir(), "free_proxy_good.txt")
+
+
+def _download_proxy_list():
+    path = _proxy_list_path()
+    try:
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) < PROXY_LIST_TTL:
+            with open(path) as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+            if lines:
+                return lines
+    except OSError:
+        pass
+    resp = requests.get(FREE_PROXY_LIST_URL, timeout=10)
+    resp.raise_for_status()
+    lines = [ln.strip() for ln in resp.text.splitlines() if ln.strip()]
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+    except OSError:
+        pass
+    return lines
+
+
+def _read_good_proxy():
+    path = _good_proxy_path()
+    try:
+        if time.time() - os.path.getmtime(path) < GOOD_PROXY_TTL:
+            with open(path) as f:
+                cached = f.read().strip()
+            return cached or None
+    except OSError:
+        pass
+    return None
+
+
+def _write_good_proxy(proxy):
+    try:
+        with open(_good_proxy_path(), "w") as f:
+            f.write(proxy)
+    except OSError:
+        pass
+
+
+def _invalidate_good_proxy():
+    try:
+        os.remove(_good_proxy_path())
+    except OSError:
+        pass
+
+
+def _probe(proxy):
+    try:
+        r = requests.get(
+            PROXY_PROBE_URL,
+            proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
+            timeout=PROBE_TIMEOUT,
+        )
+        return proxy if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def find_free_proxy(exclude=()):
+    """Find a working proxy from TheSpeedX/PROXY-List (free, unauthenticated HTTP proxies)."""
+    cached = _read_good_proxy()
+    if cached and cached not in exclude and _probe(cached):
+        return cached
+
+    try:
+        candidates = _download_proxy_list()
+    except Exception as e:
+        print(f"[warn] could not download free proxy list: {e}", file=sys.stderr)
+        return None
+
+    candidates = [c for c in candidates if c not in exclude]
+    random.shuffle(candidates)
+    candidates = candidates[:MAX_PROBE_CANDIDATES]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
+        futures = {ex.submit(_probe, c) for c in candidates}
+        for fut in concurrent.futures.as_completed(futures):
+            result = fut.result()
+            if result:
+                for other in futures:
+                    other.cancel()
+                _write_good_proxy(result)
+                return result
+    return None
+
+
 def clean_lines(snippets):
     lines = []
     prev = None
@@ -237,17 +372,10 @@ def clean_lines(snippets):
     return lines
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("usage: transcript_helper.py <video_id> [lang]", file=sys.stderr)
-        sys.exit(2)
-
-    video_id = sys.argv[1]
-    lang = sys.argv[2] if len(sys.argv) > 2 else "en"
-
-    api = YouTubeTranscriptApi(proxy_config=build_proxy_config())
+def resolve(api, video_id, lang):
+    """Fetch a transcript, falling back to any available language if `lang` isn't found."""
     try:
-        transcript = api.fetch(video_id, languages=[lang])
+        return api.fetch(video_id, languages=[lang])
     except NoTranscriptFound:
         try:
             available = api.list(video_id)
@@ -263,10 +391,63 @@ def main():
                 f"using '{chosen.language_code}' instead",
                 file=sys.stderr,
             )
-            transcript = chosen.fetch()
+            return chosen.fetch()
+        except (TranscriptsDisabled, VideoUnavailable, CouldNotRetrieveTranscript):
+            raise
         except Exception as e:
             print(f"[error] {video_id}: no transcript available ({e})", file=sys.stderr)
             sys.exit(1)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: transcript_helper.py <video_id> [lang]", file=sys.stderr)
+        sys.exit(2)
+
+    video_id = sys.argv[1]
+    lang = sys.argv[2] if len(sys.argv) > 2 else "en"
+
+    explicit_cfg = build_proxy_config()
+    free_proxy_enabled = explicit_cfg is None and os.environ.get("YTT_NO_FREE_PROXY") != "1"
+
+    try:
+        transcript = resolve(YouTubeTranscriptApi(proxy_config=explicit_cfg), video_id, lang)
+    except RequestBlocked:
+        if not free_proxy_enabled:
+            print(f"[error] {video_id}: blocked by YouTube (no proxy configured)", file=sys.stderr)
+            sys.exit(1)
+
+        transcript = None
+        tried = set()
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            print(f"[info] {video_id}: blocked — searching TheSpeedX/PROXY-List for a working free proxy (attempt {attempt}/{max_attempts})...", file=sys.stderr)
+            proxy = find_free_proxy(exclude=tried)
+            if not proxy:
+                print(f"[error] {video_id}: blocked and no working free proxy found", file=sys.stderr)
+                sys.exit(1)
+            tried.add(proxy)
+            print(f"[info] {video_id}: retrying via free proxy {proxy}", file=sys.stderr)
+            try:
+                free_cfg = GenericProxyConfig(http_url=f"http://{proxy}", https_url=f"http://{proxy}")
+                transcript = resolve(YouTubeTranscriptApi(proxy_config=free_cfg), video_id, lang)
+                break
+            except TranscriptsDisabled:
+                print(f"[error] {video_id}: transcripts are disabled for this video", file=sys.stderr)
+                sys.exit(1)
+            except VideoUnavailable:
+                print(f"[error] {video_id}: video unavailable", file=sys.stderr)
+                sys.exit(1)
+            except (RequestBlocked, requests.exceptions.RequestException, OSError) as e:
+                # This free proxy is dead/blocked/flaky either way — drop it and try another.
+                _invalidate_good_proxy()
+                if attempt == max_attempts:
+                    print(f"[error] {video_id}: still failing after {max_attempts} free proxy attempts ({e})", file=sys.stderr)
+                    sys.exit(1)
+                continue
+            except CouldNotRetrieveTranscript as e:
+                print(f"[error] {video_id}: {e}", file=sys.stderr)
+                sys.exit(1)
     except TranscriptsDisabled:
         print(f"[error] {video_id}: transcripts are disabled for this video", file=sys.stderr)
         sys.exit(1)
@@ -275,6 +456,9 @@ def main():
         sys.exit(1)
     except CouldNotRetrieveTranscript as e:
         print(f"[error] {video_id}: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"[error] {video_id}: unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
 
     for line in clean_lines(transcript.snippets):
@@ -406,8 +590,12 @@ if printf '%s' "$URL" | grep -q 'list='; then
         for f in "$WORK_DIR"/*.err; do
             [ -s "$f" ] && sed 's/^/  /' "$f" >&2
         done
-        if grep -qsl "blocking requests from your IP" "$WORK_DIR"/*.err 2>/dev/null; then
-            log "⚠️  YouTube is rate-limiting this IP. Retry later, lower -j (e.g. -j 3), or use --proxy/--webshare-user+--webshare-pass (see --help)."
+        if grep -qsl "blocked" "$WORK_DIR"/*.err 2>/dev/null; then
+            if [ "$NO_FREE_PROXY" -eq 1 ]; then
+                log "⚠️  YouTube blocked some requests. Retry later, lower -j (e.g. -j 3), drop --no-free-proxy, or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+            else
+                log "⚠️  YouTube blocked some requests (the automatic free-proxy fallback was tried too). Retry later, lower -j (e.g. -j 3), or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+            fi
         fi
     fi
 
@@ -467,8 +655,12 @@ ERR="$TMP_ROOT/result.err"
 rc=$?
 [ -s "$ERR" ] && sed 's/^/  /' "$ERR" >&2
 if [ "$rc" -ne 0 ]; then
-    if grep -qs "blocking requests from your IP" "$ERR" 2>/dev/null; then
-        log "⚠️  YouTube is rate-limiting this IP. Retry later, or use --proxy/--webshare-user+--webshare-pass (see --help)."
+    if grep -qs "blocked" "$ERR" 2>/dev/null; then
+        if [ "$NO_FREE_PROXY" -eq 1 ]; then
+            log "⚠️  YouTube blocked the request. Retry later, drop --no-free-proxy, or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+        else
+            log "⚠️  YouTube blocked the request (the automatic free-proxy fallback was tried too). Retry later, or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+        fi
     fi
     die "failed to fetch transcript for $VIDEO_ID"
 fi
