@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+#
+# ytTranscript - fetch YouTube video/playlist transcripts using the
+# youtube-transcript-api Python library (https://github.com/jdepoix/youtube-transcript-api)
+#
+# Single video : copies the transcript to the clipboard by default,
+#                or saves it with -o/--output.
+# Playlist     : fetches every video's transcript in parallel and, by
+#                default, copies the combined transcript to the clipboard.
+#                Use -d/--dir to save one .txt file per video, or
+#                -s/--single (optionally with -o) to save one combined file.
+
+set -uo pipefail
+
+SCRIPT_NAME="$(basename "$0")"
+CACHE_DIR="$HOME/.cache/yt-transcript"
+VENV_DIR="$CACHE_DIR/venv"
+PYTHON_BIN="$VENV_DIR/bin/python"
+HELPER="$CACHE_DIR/transcript_helper.py"
+
+LANG_CODE="en"
+JOBS=4
+OUTPUT=""
+DIR_OUT=""
+SINGLE=0
+QUIET=0
+
+usage() {
+    cat <<EOF
+${SCRIPT_NAME} - fetch YouTube transcripts (single video or full playlist)
+
+USAGE:
+    ${SCRIPT_NAME} [OPTIONS] <YouTube video or playlist URL>
+
+DESCRIPTION:
+    Fetches transcripts via the youtube-transcript-api Python library.
+    A python venv with the library is created automatically on first run.
+
+    Single video URL:
+        - default             copy the transcript to the clipboard
+        - -o/--output FILE    save the transcript to FILE instead
+
+    Playlist URL (any URL containing "list="):
+        - default             copy ALL transcripts (concatenated) to the clipboard
+        - -d/--dir DIR        save one .txt file per video into DIR
+        - -s/--single         save ONE combined .txt file (name it with -o,
+                               otherwise it's named after the playlist)
+
+OPTIONS:
+    -o, --output FILE   Output file (single video, or combined playlist file)
+    -d, --dir DIR       Save playlist transcripts as separate files in DIR
+    -s, --single        Combine playlist transcripts into a single file
+    -l, --lang CODE     Transcript language code (default: en)
+    -j, --jobs N        Parallel workers for playlist fetching (default: 4)
+    -q, --quiet         Suppress progress output
+    -h, --help          Show this help and exit
+
+EXAMPLES:
+    ${SCRIPT_NAME} "https://youtu.be/dQw4w9WgXcQ"
+        Copy this video's transcript to the clipboard.
+
+    ${SCRIPT_NAME} -o transcript.txt "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        Save this video's transcript to transcript.txt.
+
+    ${SCRIPT_NAME} -d ./transcripts "https://www.youtube.com/playlist?list=PLxxxx"
+        Save one .txt file per video into ./transcripts/.
+
+    ${SCRIPT_NAME} -s -o all.txt -j 8 "https://www.youtube.com/playlist?list=PLxxxx"
+        Fetch with 8 parallel workers, combine into all.txt.
+EOF
+}
+
+log() { [ "$QUIET" -eq 1 ] || echo "$@" >&2; }
+die() { echo "❌ $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+URL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o|--output)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            OUTPUT="$2"; shift 2 ;;
+        -d|--dir)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            DIR_OUT="$2"; shift 2 ;;
+        -s|--single)
+            SINGLE=1; shift ;;
+        -l|--lang)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            LANG_CODE="$2"; shift 2 ;;
+        -j|--jobs)
+            [ $# -ge 2 ] || die "$1 requires an argument"
+            JOBS="$2"; shift 2 ;;
+        -q|--quiet)
+            QUIET=1; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        --)
+            shift; break ;;
+        -*)
+            die "Unknown option: $1 (see --help)" ;;
+        *)
+            URL="$1"; shift ;;
+    esac
+done
+[ -n "${1:-}" ] && URL="$1"
+
+if [ -z "$URL" ]; then
+    usage
+    exit 1
+fi
+
+case "$JOBS" in
+    ''|*[!0-9]*) die "--jobs must be a positive integer" ;;
+esac
+[ "$JOBS" -ge 1 ] || die "--jobs must be at least 1"
+
+# ---------------------------------------------------------------------------
+# Bootstrap python venv + youtube-transcript-api (once, cached)
+# ---------------------------------------------------------------------------
+write_helper() {
+    mkdir -p "$CACHE_DIR"
+    cat > "$HELPER" <<'PYEOF'
+#!/usr/bin/env python3
+import sys
+
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+    CouldNotRetrieveTranscript,
+)
+
+
+def clean_lines(snippets):
+    lines = []
+    prev = None
+    for s in snippets:
+        text = " ".join(s.text.split())
+        if not text or text == prev:
+            continue
+        lines.append(text)
+        prev = text
+    return lines
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: transcript_helper.py <video_id> [lang]", file=sys.stderr)
+        sys.exit(2)
+
+    video_id = sys.argv[1]
+    lang = sys.argv[2] if len(sys.argv) > 2 else "en"
+
+    api = YouTubeTranscriptApi()
+    try:
+        transcript = api.fetch(video_id, languages=[lang])
+    except NoTranscriptFound:
+        try:
+            available = api.list(video_id)
+            chosen = None
+            for t in available:
+                if not t.is_generated:
+                    chosen = t
+                    break
+            if chosen is None:
+                chosen = next(iter(available))
+            print(
+                f"[warn] '{lang}' not found for {video_id}; "
+                f"using '{chosen.language_code}' instead",
+                file=sys.stderr,
+            )
+            transcript = chosen.fetch()
+        except Exception as e:
+            print(f"[error] {video_id}: no transcript available ({e})", file=sys.stderr)
+            sys.exit(1)
+    except TranscriptsDisabled:
+        print(f"[error] {video_id}: transcripts are disabled for this video", file=sys.stderr)
+        sys.exit(1)
+    except VideoUnavailable:
+        print(f"[error] {video_id}: video unavailable", file=sys.stderr)
+        sys.exit(1)
+    except CouldNotRetrieveTranscript as e:
+        print(f"[error] {video_id}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    for line in clean_lines(transcript.snippets):
+        print(line)
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+}
+
+ensure_env() {
+    if [ ! -x "$PYTHON_BIN" ]; then
+        command -v python3 >/dev/null 2>&1 || die "python3 is required but not found"
+        log "⏳ Setting up python environment in $VENV_DIR (first run only)..."
+        python3 -m venv "$VENV_DIR" || die "failed to create venv"
+        "$VENV_DIR/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1
+        "$VENV_DIR/bin/pip" install --quiet youtube-transcript-api \
+            || die "failed to install youtube-transcript-api"
+    fi
+    if [ ! -f "$HELPER" ]; then
+        write_helper
+    fi
+}
+
+command -v yt-dlp >/dev/null 2>&1 || die "yt-dlp is required but not found"
+command -v jq >/dev/null 2>&1 || die "jq is required but not found"
+ensure_env
+
+# ---------------------------------------------------------------------------
+# Clipboard helper
+# ---------------------------------------------------------------------------
+copy_to_clipboard() {
+    local file="$1"
+    local notify="notify-send"
+    command -v notify-send >/dev/null 2>&1 || notify="echo"
+
+    if command -v wl-copy >/dev/null 2>&1 && [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+        wl-copy < "$file"
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+            "$notify" "Transcript Copied" "Ready to paste!" --icon=edit-copy >/dev/null 2>&1
+    elif command -v xclip >/dev/null 2>&1; then
+        xclip -selection clipboard < "$file"
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+            "$notify" "Transcript Copied" "Ready to paste!" --icon=edit-copy >/dev/null 2>&1
+    elif command -v xsel >/dev/null 2>&1; then
+        xsel --clipboard < "$file"
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+            "$notify" "Transcript Copied" "Ready to paste!" --icon=edit-copy >/dev/null 2>&1
+    else
+        log "⚠️  No clipboard tool found (wl-copy/xclip/xsel) — printing to stdout instead:"
+        cat "$file"
+    fi
+}
+
+sanitize() {
+    # strip characters that are awkward in filenames, collapse whitespace
+    printf '%s' "$1" | tr '/\n\r\t' '    ' | sed -E 's/[<>:"\\|?*]+//g; s/ +/ /g; s/^ +| +$//g' | cut -c1-120
+}
+
+extract_video_id() {
+    local url="$1"
+    local id
+    id=$(printf '%s' "$url" | grep -oE '(youtu\.be/|v=|/shorts/|/embed/)[A-Za-z0-9_-]{11}' | head -n1 | grep -oE '[A-Za-z0-9_-]{11}$')
+    printf '%s' "$id"
+}
+
+TMP_ROOT=$(mktemp -d)
+cleanup() { rm -rf "$TMP_ROOT"; }
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Playlist mode
+# ---------------------------------------------------------------------------
+if printf '%s' "$URL" | grep -q 'list='; then
+    log "📃 Fetching playlist info..."
+    PLIST_JSON="$TMP_ROOT/playlist.json"
+    yt-dlp --flat-playlist -J "$URL" > "$PLIST_JSON" 2>"$TMP_ROOT/yt-dlp.err"
+    [ -s "$PLIST_JSON" ] || die "could not read playlist (see $TMP_ROOT/yt-dlp.err): $(cat "$TMP_ROOT/yt-dlp.err" 2>/dev/null)"
+
+    PLAYLIST_TITLE=$(jq -r '.title // "playlist"' "$PLIST_JSON")
+    COUNT=$(jq -r '.entries | length' "$PLIST_JSON")
+    [ "$COUNT" -gt 0 ] || die "playlist has no videos"
+    log "📃 Playlist: $PLAYLIST_TITLE ($COUNT videos) — using $JOBS parallel workers"
+
+    ENTRIES_FILE="$TMP_ROOT/entries.tsv"
+    jq -r '.entries[] | select(.id != null) | [.id, (.title // .id)] | @tsv' "$PLIST_JSON" > "$ENTRIES_FILE"
+
+    WORK_DIR="$TMP_ROOT/work"
+    mkdir -p "$WORK_DIR"
+
+    WIDTH=${#COUNT}
+    idx=0
+    pids=()
+    declare -A PID_IDX
+
+    fetch_one() {
+        local i="$1" vid="$2"
+        "$PYTHON_BIN" "$HELPER" "$vid" "$LANG_CODE" \
+            > "$WORK_DIR/$i.txt" 2> "$WORK_DIR/$i.err"
+        echo $? > "$WORK_DIR/$i.rc"
+    }
+
+    while IFS=$'\t' read -r vid title; do
+        idx=$((idx + 1))
+        printf '%s' "$title" > "$WORK_DIR/$idx.title"
+        fetch_one "$idx" "$vid" &
+        pids+=($!)
+        if [ "${#pids[@]}" -ge "$JOBS" ]; then
+            wait -n 2>/dev/null
+            # prune finished pids
+            new_pids=()
+            for p in "${pids[@]}"; do
+                kill -0 "$p" 2>/dev/null && new_pids+=("$p")
+            done
+            pids=("${new_pids[@]}")
+        fi
+        log "  queued $idx/$COUNT: $title"
+    done < "$ENTRIES_FILE"
+    wait
+
+    OK=0
+    FAIL=0
+    for f in "$WORK_DIR"/*.rc; do
+        rc=$(cat "$f")
+        if [ "$rc" -eq 0 ]; then OK=$((OK + 1)); else FAIL=$((FAIL + 1)); fi
+    done
+    log "✅ Done: $OK succeeded, $FAIL failed"
+    if [ "$FAIL" -gt 0 ]; then
+        for f in "$WORK_DIR"/*.err; do
+            [ -s "$f" ] && sed 's/^/  /' "$f" >&2
+        done
+    fi
+
+    if [ -n "$DIR_OUT" ]; then
+        mkdir -p "$DIR_OUT" || die "could not create $DIR_OUT"
+        for i in $(seq 1 "$COUNT"); do
+            [ -s "$WORK_DIR/$i.txt" ] || continue
+            title=$(cat "$WORK_DIR/$i.title" 2>/dev/null)
+            name=$(sanitize "$title")
+            num=$(printf "%0${WIDTH}d" "$i")
+            cp "$WORK_DIR/$i.txt" "$DIR_OUT/${num}_${name}.txt"
+        done
+        log "💾 Saved $OK transcript file(s) to: $DIR_OUT"
+    elif [ "$SINGLE" -eq 1 ] || [ -n "$OUTPUT" ]; then
+        target="$OUTPUT"
+        if [ -z "$target" ]; then
+            target="$(sanitize "$PLAYLIST_TITLE")_transcripts.txt"
+        fi
+        : > "$target"
+        for i in $(seq 1 "$COUNT"); do
+            [ -s "$WORK_DIR/$i.txt" ] || continue
+            title=$(cat "$WORK_DIR/$i.title" 2>/dev/null)
+            {
+                echo "===== [$i/$COUNT] $title ====="
+                cat "$WORK_DIR/$i.txt"
+                echo
+            } >> "$target"
+        done
+        log "💾 Saved combined transcript to: $target"
+    else
+        COMBINED="$TMP_ROOT/combined.txt"
+        : > "$COMBINED"
+        for i in $(seq 1 "$COUNT"); do
+            [ -s "$WORK_DIR/$i.txt" ] || continue
+            title=$(cat "$WORK_DIR/$i.title" 2>/dev/null)
+            {
+                echo "===== [$i/$COUNT] $title ====="
+                cat "$WORK_DIR/$i.txt"
+                echo
+            } >> "$COMBINED"
+        done
+        copy_to_clipboard "$COMBINED"
+    fi
+
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Single video mode
+# ---------------------------------------------------------------------------
+VIDEO_ID=$(extract_video_id "$URL")
+[ -n "$VIDEO_ID" ] || die "could not extract a video ID from: $URL"
+
+RESULT="$TMP_ROOT/result.txt"
+ERR="$TMP_ROOT/result.err"
+"$PYTHON_BIN" "$HELPER" "$VIDEO_ID" "$LANG_CODE" > "$RESULT" 2> "$ERR"
+rc=$?
+[ -s "$ERR" ] && sed 's/^/  /' "$ERR" >&2
+[ "$rc" -eq 0 ] || die "failed to fetch transcript for $VIDEO_ID"
+[ -s "$RESULT" ] || die "transcript for $VIDEO_ID was empty"
+
+if [ -n "$OUTPUT" ]; then
+    cp "$RESULT" "$OUTPUT"
+    log "💾 Saved transcript to: $OUTPUT"
+else
+    copy_to_clipboard "$RESULT"
+fi
