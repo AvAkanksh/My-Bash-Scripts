@@ -372,6 +372,32 @@ def clean_lines(snippets):
     return lines
 
 
+DIRECT_RETRY_ATTEMPTS = 3
+DIRECT_RETRY_BASE_DELAY = 3  # seconds
+
+
+def fetch_with_retries(cfg, video_id, lang):
+    """Fetch a transcript, retrying on 429/blocked with backoff before giving up.
+
+    YouTube's IpBlocked/RequestBlocked is raised on HTTP 429, which is often a
+    soft, temporary rate limit rather than a hard IP ban — waiting a bit and
+    retrying the *same* connection frequently succeeds.
+    """
+    for attempt in range(1, DIRECT_RETRY_ATTEMPTS + 1):
+        try:
+            return resolve(YouTubeTranscriptApi(proxy_config=cfg), video_id, lang)
+        except RequestBlocked:
+            if attempt == DIRECT_RETRY_ATTEMPTS:
+                raise
+            delay = DIRECT_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1.5)
+            print(
+                f"[info] {video_id}: rate-limited (attempt {attempt}/{DIRECT_RETRY_ATTEMPTS}), "
+                f"waiting {delay:.1f}s before retrying...",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
 def resolve(api, video_id, lang):
     """Fetch a transcript, falling back to any available language if `lang` isn't found."""
     try:
@@ -411,10 +437,10 @@ def main():
     free_proxy_enabled = explicit_cfg is None and os.environ.get("YTT_NO_FREE_PROXY") != "1"
 
     try:
-        transcript = resolve(YouTubeTranscriptApi(proxy_config=explicit_cfg), video_id, lang)
+        transcript = fetch_with_retries(explicit_cfg, video_id, lang)
     except RequestBlocked:
         if not free_proxy_enabled:
-            print(f"[error] {video_id}: blocked by YouTube (no proxy configured)", file=sys.stderr)
+            print(f"[error] {video_id}: still blocked/rate-limited by YouTube after retries (no proxy configured)", file=sys.stderr)
             sys.exit(1)
 
         transcript = None
@@ -442,7 +468,7 @@ def main():
                 # This free proxy is dead/blocked/flaky either way — drop it and try another.
                 _invalidate_good_proxy()
                 if attempt == max_attempts:
-                    print(f"[error] {video_id}: still failing after {max_attempts} free proxy attempts ({e})", file=sys.stderr)
+                    print(f"[error] {video_id}: still blocked after {max_attempts} free proxy attempts ({e})", file=sys.stderr)
                     sys.exit(1)
                 continue
             except CouldNotRetrieveTranscript as e:
@@ -590,11 +616,32 @@ if printf '%s' "$URL" | grep -q 'list='; then
         for f in "$WORK_DIR"/*.err; do
             [ -s "$f" ] && sed 's/^/  /' "$f" >&2
         done
-        if grep -qsl "blocked" "$WORK_DIR"/*.err 2>/dev/null; then
+
+        # Break failures down by cause: retries+free-proxy already exhausted
+        # for "blocked" ones, but "disabled"/"unavailable" videos genuinely
+        # have no transcript to fetch, by anyone, proxy or not.
+        n_blocked=0
+        n_disabled=0
+        n_unavailable=0
+        n_other=0
+        for rcf in "$WORK_DIR"/*.rc; do
+            [ "$(cat "$rcf")" -eq 0 ] && continue
+            errf="${rcf%.rc}.err"
+            last_err=$(grep '^\[error\]' "$errf" 2>/dev/null | tail -n1)
+            case "$last_err" in
+                *blocked*) n_blocked=$((n_blocked + 1)) ;;
+                *"transcripts are disabled"*) n_disabled=$((n_disabled + 1)) ;;
+                *"video unavailable"*) n_unavailable=$((n_unavailable + 1)) ;;
+                *) n_other=$((n_other + 1)) ;;
+            esac
+        done
+        log "   Failure breakdown: $n_blocked blocked/rate-limited, $n_disabled no captions available, $n_unavailable video unavailable, $n_other other"
+
+        if [ "$n_blocked" -gt 0 ]; then
             if [ "$NO_FREE_PROXY" -eq 1 ]; then
-                log "⚠️  YouTube blocked some requests. Retry later, lower -j (e.g. -j 3), drop --no-free-proxy, or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+                log "⚠️  YouTube blocked some requests even after retries. Retry later, lower -j (e.g. -j 3), drop --no-free-proxy, or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
             else
-                log "⚠️  YouTube blocked some requests (the automatic free-proxy fallback was tried too). Retry later, lower -j (e.g. -j 3), or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
+                log "⚠️  YouTube blocked some requests even after retries and the free-proxy fallback. Retry later, lower -j (e.g. -j 3), or set up a reliable proxy with --webshare-user/--webshare-pass (see --help)."
             fi
         fi
     fi
