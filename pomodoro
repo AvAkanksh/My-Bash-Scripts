@@ -1,0 +1,497 @@
+#!/bin/bash
+#
+# pomodoro - a terminal pomodoro timer with big, colored text that scales
+#            to your terminal window's current width/height.
+#
+# No dependencies beyond bash + tput (ncurses). Honors the NO_COLOR env var.
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+WORK_MIN=25
+BREAK_MIN=5
+LONG_BREAK_MIN=15
+INTERVAL=4      # work sessions before a long break
+CYCLES=0        # 0 = run forever
+QUIET=0
+
+PROG="$(basename "$0")"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+usage() {
+    cat <<EOF
+$PROG - a simple terminal pomodoro timer with big, auto-scaling, colored text
+
+USAGE:
+  $PROG [OPTIONS]
+
+OPTIONS:
+  -w, --work MINUTES        Work session length              (default: $WORK_MIN)
+  -b, --break MINUTES       Short break length                (default: $BREAK_MIN)
+  -l, --long-break MINUTES  Long break length                 (default: $LONG_BREAK_MIN)
+  -i, --interval N          Work sessions before a long break (default: $INTERVAL)
+  -c, --cycles N            Stop after N work sessions        (default: 0 = forever)
+  -q, --quiet                No bell / desktop notifications
+  -h, --help                  Show this help and exit
+
+The clock automatically shrinks or grows to fit your terminal window, and
+falls back to plain colored text if the window is too narrow for blocks.
+Colors are used automatically when supported; set NO_COLOR=1 to disable them.
+
+CONTROLS (while running):
+  p            pause / resume
+  s            skip to the next phase
+  q, Ctrl+C    quit
+
+EXAMPLES:
+  $PROG
+      Classic 25/5 pomodoro, long break every 4 sessions, runs until you quit.
+
+  $PROG -w 50 -b 10 -l 20 -i 2
+      50 min work / 10 min break / 20 min long break every 2 sessions.
+
+  $PROG -c 4
+      Run exactly 4 work sessions (with breaks in between), then exit.
+
+  $PROG -q
+      Silent mode: no terminal bell or desktop notifications.
+
+  $PROG --work 45 --break 15 --cycles 3
+      Long-form flags work too: 3x (45 min work / 15 min break).
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Arg parsing
+# ---------------------------------------------------------------------------
+is_pos_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -w|--work)
+            is_pos_int "${2:-}" || { echo "Error: $1 needs a number of minutes" >&2; exit 1; }
+            WORK_MIN=$2; shift 2 ;;
+        -b|--break)
+            is_pos_int "${2:-}" || { echo "Error: $1 needs a number of minutes" >&2; exit 1; }
+            BREAK_MIN=$2; shift 2 ;;
+        -l|--long-break)
+            is_pos_int "${2:-}" || { echo "Error: $1 needs a number of minutes" >&2; exit 1; }
+            LONG_BREAK_MIN=$2; shift 2 ;;
+        -i|--interval)
+            is_pos_int "${2:-}" || { echo "Error: $1 needs a number" >&2; exit 1; }
+            INTERVAL=$2; shift 2 ;;
+        -c|--cycles)
+            is_pos_int "${2:-}" || { echo "Error: $1 needs a number" >&2; exit 1; }
+            CYCLES=$2; shift 2 ;;
+        -q|--quiet)
+            QUIET=1; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        *)
+            echo "Error: unknown option '$1'" >&2
+            echo "Try '$PROG --help' for usage." >&2
+            exit 1 ;;
+    esac
+done
+
+[[ "$INTERVAL" -ge 1 ]] || INTERVAL=4
+
+# ---------------------------------------------------------------------------
+# Big block font (5 rows x 5 cols per glyph). '#' = pixel on, ' ' = pixel off.
+# ---------------------------------------------------------------------------
+declare -A FONT
+FONT[0]="#####|#   #|#   #|#   #|#####"
+FONT[1]="   # |  ## |   # |   # | ####"
+FONT[2]="#####|    #|#####|#    |#####"
+FONT[3]="#####|    #|#####|    #|#####"
+FONT[4]="#   #|#   #|#####|    #|    #"
+FONT[5]="#####|#    |#####|    #|#####"
+FONT[6]="#####|#    |#####|#   #|#####"
+FONT[7]="#####|    #|   # |  #  |  #  "
+FONT[8]="#####|#   #|#####|#   #|#####"
+FONT[9]="#####|#   #|#####|    #|#####"
+FONT[:]="     |  #  |     |  #  |     "
+FONT[' ']="     |     |     |     |     "
+
+# ---------------------------------------------------------------------------
+# Color / attribute setup
+# ---------------------------------------------------------------------------
+COLORS_AVAIL=$(tput colors 2>/dev/null); COLORS_AVAIL=${COLORS_AVAIL:-0}
+HAVE_COLOR=0
+[[ -z "${NO_COLOR:-}" && -t 1 && "$COLORS_AVAIL" -ge 8 ]] && HAVE_COLOR=1
+USE_256=0
+[[ "$COLORS_AVAIL" -ge 256 ]] && USE_256=1
+
+RESET="$(tput sgr0 2>/dev/null)"
+BOLD="$(tput bold 2>/dev/null)"
+REV="$(tput rev 2>/dev/null)"
+DIM="$(tput dim 2>/dev/null)"
+
+# Solid block pixel: colored space when color is available, reverse-video
+# space when only reverse-video is supported, plain '#' as a last resort.
+if [[ "$HAVE_COLOR" -eq 1 || -n "$REV" ]]; then
+    PIXEL_CHAR=' '
+else
+    PIXEL_CHAR='#'
+fi
+
+# phase_bg_code PHASE_KEY WARN -> echoes a color number for setab/setaf
+phase_color_code() {
+    local phase="$1" warn="$2" code
+    if [[ "$warn" -eq 1 ]]; then
+        code=196; [[ "$USE_256" -eq 0 ]] && code=1
+    else
+        case "$phase" in
+            work)  code=208; [[ "$USE_256" -eq 0 ]] && code=1 ;;
+            break) code=34;  [[ "$USE_256" -eq 0 ]] && code=2 ;;
+            long)  code=39;  [[ "$USE_256" -eq 0 ]] && code=4 ;;
+            pause) code=226; [[ "$USE_256" -eq 0 ]] && code=3 ;;
+            *)     code=255; [[ "$USE_256" -eq 0 ]] && code=7 ;;
+        esac
+    fi
+    echo "$code"
+}
+
+# bg_attr PHASE_KEY WARN -> escape sequence for a solid block of that phase
+bg_attr() {
+    local phase="$1" warn="${2:-0}"
+    if [[ "$HAVE_COLOR" -eq 1 ]]; then
+        tput setab "$(phase_color_code "$phase" "$warn")" 2>/dev/null
+    else
+        echo "$REV"
+    fi
+}
+
+# fg_attr PHASE_KEY WARN -> escape sequence for phase-colored text
+fg_attr() {
+    local phase="$1" warn="${2:-0}"
+    [[ "$HAVE_COLOR" -eq 1 ]] && tput setaf "$(phase_color_code "$phase" "$warn")" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Terminal helpers
+# ---------------------------------------------------------------------------
+cleanup() {
+    tput cnorm 2>/dev/null
+    tput sgr0 2>/dev/null
+    printf '\033[H\033[2J'
+    stty echo 2>/dev/null
+}
+
+quit_now() {
+    cleanup
+    echo "Stopped. Completed $SESSIONS_DONE pomodoro(s). Bye!"
+    exit 0
+}
+trap quit_now INT TERM
+
+term_cols() { tput cols 2>/dev/null || echo 80; }
+term_lines() { tput lines 2>/dev/null || echo 24; }
+
+center_line() {
+    local text="$1" visible="$2" cols pad
+    cols=$(term_cols)
+    pad=$(( (cols - visible) / 2 ))
+    (( pad < 0 )) && pad=0
+    printf '%*s%s\n' "$pad" "" "$text"
+}
+
+notify() {
+    local title="$1" msg="$2"
+    [[ "$QUIET" -eq 1 ]] && return
+    printf '\a'
+    command -v notify-send >/dev/null 2>&1 && notify-send "$title" "$msg" >/dev/null 2>&1
+}
+
+# emit_run CHAR RUN_LEN SCALE ON_ATTR -> a colored/plain run of RUN_LEN*SCALE cells
+emit_run() {
+    local char="$1" run_len="$2" scale="$3" on_attr="$4"
+    local width=$(( run_len * scale ))
+    if [[ "$char" == "#" ]]; then
+        local block
+        block=$(printf "%${width}s" "" | tr ' ' "$PIXEL_CHAR")
+        printf '%s%s%s' "$on_attr" "$block" "$RESET"
+    else
+        printf '%*s' "$width" ""
+    fi
+}
+
+# build_digits_block TIMESTR N SCALE ON_ATTR BLINK_OFF -> prints the scaled block-font lines
+build_digits_block() {
+    local timestr="$1" n="$2" scale="$3" on_attr="$4" blink_off="$5"
+    local r i char cellsrc grows mask line
+    local run_char run_len idx c width_total h
+    local out=""
+    for (( r=0; r<5; r++ )); do
+        mask=""
+        for (( i=0; i<n; i++ )); do
+            char="${timestr:$i:1}"
+            if [[ "$char" == ":" && "$blink_off" -eq 1 ]]; then
+                cellsrc="${FONT[' ']}"
+            else
+                cellsrc="${FONT[$char]:-${FONT[' ']}}"
+            fi
+            IFS='|' read -r -a grows <<< "$cellsrc"
+            mask+="${grows[$r]}"
+            (( i < n-1 )) && mask+=" "
+        done
+
+        line=""
+        run_char="${mask:0:1}"
+        run_len=0
+        for (( idx=0; idx<${#mask}; idx++ )); do
+            c="${mask:$idx:1}"
+            if [[ "$c" == "$run_char" ]]; then
+                run_len=$(( run_len + 1 ))
+            else
+                line+="$(emit_run "$run_char" "$run_len" "$scale" "$on_attr")"
+                run_char="$c"; run_len=1
+            fi
+        done
+        line+="$(emit_run "$run_char" "$run_len" "$scale" "$on_attr")"
+
+        width_total=$(( ${#mask} * scale ))
+        for (( h=0; h<scale; h++ )); do
+            out+="$(center_line "$line" "$width_total")"$'\n'
+        done
+    done
+    printf '%s' "$out"
+}
+
+# render TIME_STRING LABEL ELAPSED TOTAL PHASE_KEY PAUSED
+#
+# Builds the display as prioritized sections (time is mandatory and always
+# shown; label/footer/header/bar are added only if the terminal actually has
+# enough rows) so the output never exceeds the terminal size and scrolls the
+# timer itself out of view.
+render() {
+    local timestr="$1" label="$2" elapsed="$3" total="$4" phase="$5" paused="$6"
+    local remaining=$(( total - elapsed ))
+    local cols lines
+    cols=$(term_cols)
+    lines=$(term_lines)
+    (( cols < 1 )) && cols=1
+    (( lines < 1 )) && lines=1
+
+    local n=${#timestr}
+    local denom=$(( 6 * n - 1 ))
+    (( denom < 1 )) && denom=1
+    local avail_w=$(( cols - 4 ))
+
+    local scale_w=0
+    if (( avail_w >= denom )); then
+        scale_w=$(( avail_w / denom ))
+        (( scale_w < 1 )) && scale_w=1
+    fi
+
+    local use_big=1
+    (( scale_w == 0 )) && use_big=0
+    (( lines < 5 )) && use_big=0
+
+    local time_min_cost=1
+    (( use_big )) && time_min_cost=5
+
+    local budget=$(( lines - time_min_cost ))
+    (( budget < 0 )) && budget=0
+
+    # Greedily reserve rows for optional sections, highest priority first.
+    local include_label=0 include_footer=0 footer_lines=0 include_header=0 include_bar=0
+    if (( budget >= 1 )); then include_label=1; budget=$(( budget - 1 )); fi
+    if (( budget >= 2 )); then
+        include_footer=1; footer_lines=2; budget=$(( budget - 2 ))
+    elif (( budget >= 1 )); then
+        include_footer=1; footer_lines=1; budget=$(( budget - 1 ))
+    fi
+    if (( budget >= 1 )); then include_header=1; budget=$(( budget - 1 )); fi
+    if (( budget >= 1 )); then include_bar=1; budget=$(( budget - 1 )); fi
+
+    # Whatever budget is left grows the digit block (if big) and/or becomes
+    # spacer rows between sections / vertical padding.
+    local final_scale=1 spacer_budget=0 digit_lines=1
+    if (( use_big )); then
+        local digit_budget=$(( time_min_cost + budget ))
+        final_scale=$(( digit_budget / 5 ))
+        (( final_scale < 1 )) && final_scale=1
+        (( final_scale > scale_w )) && final_scale=$scale_w
+        digit_lines=$(( final_scale * 5 ))
+        spacer_budget=$(( digit_budget - digit_lines ))
+    else
+        digit_lines=1
+        spacer_budget=$budget
+    fi
+
+    # ---- Build each section's content ----
+    local header_block="" label_block="" digits_block="" bar_block="" footer_block=""
+
+    if (( include_header )); then
+        local spin_chars='|/-\'
+        local spin_char="${spin_chars:$(( elapsed % 4 )):1}"
+        local head_attr="${BOLD}$(fg_attr "$phase")"
+        local head_text="== POMODORO ${spin_char} =="
+        header_block="$(center_line "${head_attr}${head_text}${RESET}" "${#head_text}")"$'\n'
+    fi
+
+    if (( include_label )); then
+        local label_display="$label" label_phase="$phase"
+        if [[ "$paused" -eq 1 ]]; then
+            label_display+="  [PAUSED]"
+            label_phase="pause"
+        fi
+        local label_attr="${BOLD}$(fg_attr "$label_phase")"
+        label_block="$(center_line "${label_attr}${label_display}${RESET}" "${#label_display}")"$'\n'
+    fi
+
+    if (( use_big )); then
+        local warn=0
+        (( remaining <= 10 && remaining % 2 == 0 && paused == 0 )) && warn=1
+        local on_attr
+        if [[ "$paused" -eq 1 ]]; then
+            on_attr=$(bg_attr pause)
+        else
+            on_attr=$(bg_attr "$phase" "$warn")
+        fi
+        local blink_off=0
+        (( paused == 0 && remaining % 2 == 1 )) && blink_off=1
+        digits_block="$(build_digits_block "$timestr" "$n" "$final_scale" "$on_attr" "$blink_off")"$'\n'
+    else
+        local ttext="$timestr"
+        local tattr="${BOLD}$(fg_attr "$phase")"
+        digits_block="$(center_line "${tattr}${ttext}${RESET}" "${#ttext}")"$'\n'
+    fi
+
+    if (( include_bar )); then
+        local bar_width=$(( cols - 10 ))
+        (( bar_width < 10 )) && bar_width=10
+        (( bar_width > 60 )) && bar_width=60
+        local filled=0
+        (( total > 0 )) && filled=$(( elapsed * bar_width / total ))
+        (( filled > bar_width )) && filled=$bar_width
+        local bar_attr
+        bar_attr=$(bg_attr "$phase" 0)
+        local filled_str empty_str
+        filled_str=$(printf "%${filled}s" "" | tr ' ' "$PIXEL_CHAR")
+        empty_str=$(printf "%$((bar_width - filled))s" "" | tr ' ' '.')
+        local bar_text="[${bar_attr}${filled_str}${RESET}${DIM}${empty_str}${RESET}]"
+        bar_block="$(center_line "$bar_text" "$(( bar_width + 2 ))")"$'\n'
+    fi
+
+    if (( include_footer )); then
+        if (( footer_lines == 2 )); then
+            local session_info="Pomodoros completed: $SESSIONS_DONE"
+            [[ "$CYCLES" -gt 0 ]] && session_info+=" / $CYCLES"
+            footer_block="$(center_line "${DIM}${session_info}${RESET}" "${#session_info}")"$'\n'
+            local hint="p = pause   s = skip   q = quit"
+            footer_block+="$(center_line "${DIM}${hint}${RESET}" "${#hint}")"$'\n'
+        else
+            local combined="Done:${SESSIONS_DONE}"
+            [[ "$CYCLES" -gt 0 ]] && combined+="/${CYCLES}"
+            combined+="  p:pause s:skip q:quit"
+            footer_block="$(center_line "${DIM}${combined}${RESET}" "${#combined}")"$'\n'
+        fi
+    fi
+
+    # ---- Assemble in fixed visual order, filling gaps from spacer_budget ----
+    local -a sections=()
+    (( include_header )) && sections+=("$header_block")
+    (( include_label )) && sections+=("$label_block")
+    sections+=("$digits_block")
+    (( include_bar )) && sections+=("$bar_block")
+    (( include_footer )) && sections+=("$footer_block")
+
+    local buf
+    buf=$(printf '\033[H\033[2J')
+
+    local total_sections=${#sections[@]}
+    local idx
+    for (( idx=0; idx<total_sections; idx++ )); do
+        buf+="${sections[$idx]}"
+        if (( idx < total_sections - 1 && spacer_budget > 0 )); then
+            buf+=$'\n'
+            spacer_budget=$(( spacer_budget - 1 ))
+        fi
+    done
+
+    # Leftover budget (couldn't be used as internal gaps) becomes vertical
+    # centering padding on spacious terminals; costs nothing when tight.
+    if (( spacer_budget > 0 )); then
+        local pad_top=$(( spacer_budget / 2 ))
+        local pad_bottom=$(( spacer_budget - pad_top ))
+        local pad_str
+        pad_str=$(printf "%${pad_top}s" "" | tr ' ' '\n')
+        buf="${pad_str}${buf}"
+        pad_str=$(printf "%${pad_bottom}s" "" | tr ' ' '\n')
+        buf+="$pad_str"
+    fi
+
+    printf '%s' "$buf"
+}
+
+# run_phase SECONDS LABEL PHASE_KEY
+# returns via global SKIPPED=1 if user skipped
+run_phase() {
+    local total=$1 label=$2 phase=$3
+    local remaining=$total
+    local paused=0
+    SKIPPED=0
+
+    while [[ $remaining -gt 0 ]]; do
+        local mins secs timestr
+        mins=$(( remaining / 60 ))
+        secs=$(( remaining % 60 ))
+        timestr=$(printf "%02d:%02d" "$mins" "$secs")
+
+        render "$timestr" "$label" $(( total - remaining )) "$total" "$phase" "$paused"
+
+        local key=""
+        read -rs -t 1 -n 1 key || true
+
+        case "$key" in
+            q) quit_now ;;
+            p) paused=$(( 1 - paused )) ;;
+            s) SKIPPED=1; return 0 ;;
+        esac
+
+        [[ $paused -eq 0 ]] && remaining=$(( remaining - 1 ))
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+main() {
+    SESSIONS_DONE=0
+    tput civis 2>/dev/null
+    stty -echo 2>/dev/null
+
+    while true; do
+        if [[ "$CYCLES" -gt 0 && "$SESSIONS_DONE" -ge "$CYCLES" ]]; then
+            break
+        fi
+
+        run_phase $(( WORK_MIN * 60 )) "WORK - Session $(( SESSIONS_DONE + 1 ))" work
+        SESSIONS_DONE=$(( SESSIONS_DONE + 1 ))
+        [[ "$SKIPPED" -eq 0 ]] && notify "Pomodoro" "Work session done. Time for a break!"
+
+        if [[ "$CYCLES" -gt 0 && "$SESSIONS_DONE" -ge "$CYCLES" ]]; then
+            break
+        fi
+
+        if (( SESSIONS_DONE % INTERVAL == 0 )); then
+            run_phase $(( LONG_BREAK_MIN * 60 )) "LONG BREAK" long
+        else
+            run_phase $(( BREAK_MIN * 60 )) "BREAK" break
+        fi
+        [[ "$SKIPPED" -eq 0 ]] && notify "Pomodoro" "Break's over. Back to work!"
+    done
+
+    cleanup
+    echo "All done! Completed $SESSIONS_DONE pomodoro(s). Nice work."
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main
+fi
